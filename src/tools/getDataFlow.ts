@@ -1,7 +1,13 @@
 import type { ComponentScanner } from "../scanner/componentScanner.js";
 import type { CacheManager } from "../cache/cacheManager.js";
 import type { AmbiguousMatch, Component } from "../types.js";
-import { ambiguousResult, ensureCatalog, filterByFile } from "./shared.js";
+import {
+  ensureCatalog,
+  findByLayers,
+  isAmbiguousMatch,
+  resolveByName,
+  RENDERABLE_LAYERS,
+} from "./shared.js";
 
 export interface DataFlowStep {
   name: string;
@@ -64,21 +70,11 @@ export async function getDataFlow(
 ): Promise<DataFlowResult | AmbiguousMatch | null> {
   const catalog = await ensureCatalog(scanner, cache);
 
-  const matches = cache.getByName(args.name);
-  if (matches.length === 0) return null;
-
   // Colliding names are a real footgun here: tracing the wrong "Header" gives a
   // confident but wrong endpoint prediction. Narrow by `file` when we can; if
   // that leaves the choice open, say so instead of guessing.
-  let target = matches[0];
-  if (matches.length > 1) {
-    const filtered = filterByFile(matches, args.file);
-    if (filtered.length === 1) {
-      target = filtered[0];
-    } else {
-      return ambiguousResult(args.name, filtered.length ? filtered : matches);
-    }
-  }
+  const target = resolveByName(cache.getByName(args.name), args.name, args.file);
+  if (target === null || isAmbiguousMatch(target)) return target;
 
   const maxDepth = Math.max(0, args.depth ?? DEFAULT_DEPTH);
   const chains: DataFlowChain[] = [];
@@ -157,15 +153,7 @@ export async function getDataFlow(
  * catalog resolve to null and are skipped.
  */
 function resolveChildComponent(name: string, cache: CacheManager): Component | null {
-  const matches = cache.getByName(name);
-  if (matches.length === 0) return null;
-  const renderable = matches.find(
-    (c) =>
-      c.architectureLayer === "component" ||
-      c.architectureLayer === "page" ||
-      c.architectureLayer === "context"
-  );
-  return renderable || null;
+  return findByLayers(cache.getByName(name), RENDERABLE_LAYERS) || null;
 }
 
 /**
@@ -281,6 +269,21 @@ function resolveStore(name: string, cache: CacheManager): Component | null {
   return matches.find((c) => c.architectureLayer === "store") || matches[0];
 }
 
+/**
+ * Names a source calls into: its recorded adapterCalls plus anything imported
+ * from a path matching one of `sourceKeywords` (e.g. "service", "adapter").
+ */
+function collectCallNames(source: Component, sourceKeywords: string[]): string[] {
+  const names = [...(source.adapterCalls || [])];
+  for (const imp of source.imports || []) {
+    if (!sourceKeywords.some((k) => imp.source.includes(k))) continue;
+    for (const name of imp.names) {
+      if (!names.includes(name)) names.push(name);
+    }
+  }
+  return names;
+}
+
 function traceFromServiceCalls(
   source: Component,
   catalog: { components: Component[] },
@@ -290,44 +293,18 @@ function traceFromServiceCalls(
   const adapters: DataFlowStep[] = [];
   const endpoints: string[] = [];
 
-  // Find services called by the source
-  const serviceCalls = [...(source.adapterCalls || [])];
-  // Also check imports from services directory
-  for (const imp of source.imports || []) {
-    if (imp.source.includes("service") || imp.source.includes("adapter")) {
-      for (const name of imp.names) {
-        if (!serviceCalls.includes(name)) serviceCalls.push(name);
-      }
-    }
-  }
-
-  for (const serviceName of serviceCalls) {
+  for (const serviceName of collectCallNames(source, ["service", "adapter"])) {
     const service = cache.getByName(serviceName)[0];
-    if (!service) continue;
-    if (service.architectureLayer !== "service") continue;
+    if (!service || service.architectureLayer !== "service") continue;
 
     services.push(toStep(service));
 
-    // Find adapters called by the service
-    const adapterCalls = [...(service.adapterCalls || [])];
-    for (const imp of service.imports || []) {
-      if (imp.source.includes("adapter")) {
-        for (const name of imp.names) {
-          if (!adapterCalls.includes(name)) adapterCalls.push(name);
-        }
-      }
-    }
-
-    for (const adapterName of adapterCalls) {
+    for (const adapterName of collectCallNames(service, ["adapter"])) {
       const adapter = cache.getByName(adapterName)[0];
-      if (!adapter) continue;
-      if (adapter.architectureLayer !== "adapter") continue;
+      if (!adapter || adapter.architectureLayer !== "adapter") continue;
 
       adapters.push(toStep(adapter, undefined, adapter.apiEndpoints));
-
-      if (adapter.apiEndpoints) {
-        endpoints.push(...adapter.apiEndpoints);
-      }
+      endpoints.push(...(adapter.apiEndpoints || []));
     }
   }
 

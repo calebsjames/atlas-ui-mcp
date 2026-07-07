@@ -1,5 +1,6 @@
 import type { BrowserSession } from "../browser/session.js";
 import { captureResponse, diagnostics, type McpContentResult } from "../browser/response.js";
+import { toAbsoluteUrl } from "../util.js";
 
 /**
  * The "did my change break anything" workhorse. Navigate to a URL (absolute,
@@ -16,9 +17,7 @@ export async function checkPage(
   },
   session: BrowserSession
 ): Promise<McpContentResult> {
-  const url = args.url.startsWith("http")
-    ? args.url
-    : session.baseUrl.replace(/\/$/, "") + (args.url.startsWith("/") ? args.url : `/${args.url}`);
+  const url = toAbsoluteUrl(session.baseUrl, args.url);
 
   const capture = await session.capture(url, {
     label: "check",

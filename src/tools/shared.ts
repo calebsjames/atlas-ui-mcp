@@ -23,15 +23,19 @@ export function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/** Does this component's path contain the `file` substring? No filter = match. */
+export function matchesFile(c: Component, file?: string): boolean {
+  if (!file) return true;
+  return c.relativePath.includes(file) || c.path.includes(file);
+}
+
 /**
  * Narrow name matches by a `file` path substring. Returns the original list
  * when no file was given.
  */
 export function filterByFile(matches: Component[], file?: string): Component[] {
   if (!file) return matches;
-  return matches.filter(
-    (c) => c.relativePath.includes(file) || c.path.includes(file)
-  );
+  return matches.filter((c) => matchesFile(c, file));
 }
 
 /** Build the standard "which one did you mean?" result for colliding names. */
@@ -103,6 +107,29 @@ export function toSummary(c: Component): CatalogItemSummary {
   if (c.routePath !== undefined) summary.routePath = c.routePath;
   if (c.fileAlias !== undefined) summary.fileAlias = c.fileAlias;
   return summary;
+}
+
+/** Count catalog items per architecture layer. */
+export function countByLayer(components: Component[]): Record<string, number> {
+  const byLayer: Record<string, number> = {};
+  for (const c of components) {
+    byLayer[c.architectureLayer] = (byLayer[c.architectureLayer] || 0) + 1;
+  }
+  return byLayer;
+}
+
+/** Layers that own a route. */
+export const ROUTE_OWNER_LAYERS: readonly ArchitectureLayer[] = ["page", "component"];
+
+/** Layers that can appear mounted in a rendered component tree. */
+export const RENDERABLE_LAYERS: readonly ArchitectureLayer[] = ["component", "page", "context"];
+
+/** First match whose layer is in `layers` — e.g. the renderable item among name collisions. */
+export function findByLayers(
+  matches: Component[],
+  layers: readonly ArchitectureLayer[]
+): Component | undefined {
+  return matches.find((c) => layers.includes(c.architectureLayer));
 }
 
 /** Type guard for the ambiguous-match sentinel returned by name resolution. */

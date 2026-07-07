@@ -3,6 +3,7 @@ import path from "path";
 import ts from "typescript";
 import type { RouteEntry, ProjectConfig } from "../types.js";
 import { analyzeFileRoutes } from "./fileRoutes.js";
+import { dedupeRoutes, extractDynamicSegments } from "./routeUtils.js";
 
 const PROTECTION_PATTERN = /RequireAuth|ProtectedRoute|AuthGuard/;
 const PROTECTION_WRAPPERS = ["RequireAuth", "ProtectedRoute", "AuthGuard"];
@@ -57,16 +58,8 @@ export class RouteAnalyzer {
 
     // Merge in file-based routes (Next App/Pages Router, Nuxt pages) so
     // config-less frameworks still produce a route map. Dedupe by path +
-    // component, keeping configured routes exactly as parsed above.
-    const seen = new Set(allRoutes.map((r) => `${r.path}:${r.component}`));
-    for (const route of await analyzeFileRoutes(this.workspaceRoot)) {
-      const key = `${route.path}:${route.component}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      allRoutes.push(route);
-    }
-
-    return allRoutes;
+    // component; configured routes come first, so they win.
+    return dedupeRoutes([...allRoutes, ...(await analyzeFileRoutes(this.workspaceRoot))]);
   }
 
   private buildFullPath(routePath: string | undefined, isIndex: boolean, parentPath: string): string {
@@ -86,7 +79,7 @@ export class RouteAnalyzer {
     const wrapperProtected = PROTECTION_PATTERN.test(elementText);
     const isProtected = parentProtected || wrapperProtected;
     const component = this.extractComponentFromElement(elementText);
-    const dynamicSegments = this.extractDynamicSegments(fullPath);
+    const dynamicSegments = extractDynamicSegments(fullPath);
 
     return {
       path: fullPath,
@@ -203,7 +196,7 @@ export class RouteAnalyzer {
     };
 
     visitJsx(sourceFile, "/", undefined, false);
-    return this.deduplicateRoutes(routes);
+    return dedupeRoutes(routes);
   }
 
   private isRouteElement(node: ts.Node): node is ts.JsxOpeningElement | ts.JsxSelfClosingElement {
@@ -410,29 +403,5 @@ export class RouteAnalyzer {
     if (lazyMatch) return lazyMatch[1];
 
     return null;
-  }
-
-  /**
-   * Extract dynamic segments from a route path (e.g., ":id", ":userId")
-   */
-  private extractDynamicSegments(routePath: string): string[] {
-    const segments = [...routePath.matchAll(/:([a-zA-Z_][a-zA-Z0-9_]*)/g)].map((m) => m[1]);
-    if (routePath.includes("*")) {
-      segments.push("*");
-    }
-    return segments;
-  }
-
-  /**
-   * Deduplicate routes by path
-   */
-  private deduplicateRoutes(routes: RouteEntry[]): RouteEntry[] {
-    const seen = new Set<string>();
-    return routes.filter((route) => {
-      const key = `${route.path}:${route.component}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
   }
 }

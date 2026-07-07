@@ -5,8 +5,9 @@ import type { ComponentScanner } from "../scanner/componentScanner.js";
 import type { CacheManager } from "../cache/cacheManager.js";
 import type { RouteAnalyzer } from "../analyzer/routeAnalyzer.js";
 import type { BrowserSession } from "../browser/session.js";
-import { ensureCatalog } from "./shared.js";
+import { countByLayer, ensureCatalog } from "./shared.js";
 import { analyzeFileRoutes } from "../analyzer/fileRoutes.js";
+import { matchesExclude, readPackageDeps } from "../util.js";
 
 const DEFAULT_DEV_SERVER = "http://localhost:5173";
 const REACHABILITY_TIMEOUT_MS = 1500;
@@ -92,10 +93,7 @@ export async function intelStatus(
   );
 
   const catalog = await ensureCatalog(scanner, cache);
-  const byLayer: Record<string, number> = {};
-  for (const component of catalog.components) {
-    byLayer[component.architectureLayer] = (byLayer[component.architectureLayer] || 0) + 1;
-  }
+  const byLayer = countByLayer(catalog.components);
 
   const routeFiles = await Promise.all(
     (config.routeFiles || []).map(async (file) => ({
@@ -174,7 +172,7 @@ async function countMatchingFiles(
 
   let count = 0;
   for (const entry of entries) {
-    if (isExcludedName(entry.name, excludes)) continue;
+    if (matchesExclude(entry.name, excludes)) continue;
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) {
       count += await countMatchingFiles(full, extensions, excludes);
@@ -183,15 +181,6 @@ async function countMatchingFiles(
     }
   }
   return count;
-}
-
-/** Match the scanner's exclude semantics: `*` globs, otherwise exact name. */
-function isExcludedName(name: string, excludes: string[]): boolean {
-  return excludes.some((pattern) => {
-    if (!pattern.includes("*")) return name === pattern;
-    const regex = new RegExp("^" + pattern.replace(/\./g, "\\.").replace(/\*/g, ".*") + "$");
-    return regex.test(name);
-  });
 }
 
 /**
@@ -268,40 +257,33 @@ async function findComponentDirs(
   workspaceRoot: string
 ): Promise<{ dir: string; files: number }[]> {
   const out: { dir: string; files: number }[] = [];
-
   for (const base of ["src", "app"]) {
-    const baseAbs = path.join(workspaceRoot, base);
-    let level1: import("fs").Dirent[];
-    try {
-      level1 = await fs.readdir(baseAbs, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-
-    const baseCount = await directComponentCount(baseAbs);
-    if (baseCount > 0) out.push({ dir: base, files: baseCount });
-
-    for (const d1 of level1) {
-      if (!d1.isDirectory() || EXCLUDED_DIRS.has(d1.name)) continue;
-      const d1Abs = path.join(baseAbs, d1.name);
-      const c1 = await directComponentCount(d1Abs);
-      if (c1 > 0) out.push({ dir: `${base}/${d1.name}`, files: c1 });
-
-      let level2: import("fs").Dirent[];
-      try {
-        level2 = await fs.readdir(d1Abs, { withFileTypes: true });
-      } catch {
-        continue;
-      }
-      for (const d2 of level2) {
-        if (!d2.isDirectory() || EXCLUDED_DIRS.has(d2.name)) continue;
-        const c2 = await directComponentCount(path.join(d1Abs, d2.name));
-        if (c2 > 0) out.push({ dir: `${base}/${d1.name}/${d2.name}`, files: c2 });
-      }
-    }
+    await collectComponentDirs(path.join(workspaceRoot, base), base, 2, out);
   }
-
   return out.sort((a, b) => b.files - a.files).slice(0, 12);
+}
+
+/** Depth-limited walk recording every directory that directly contains component files. */
+async function collectComponentDirs(
+  dirAbs: string,
+  dirRel: string,
+  depth: number,
+  out: { dir: string; files: number }[]
+): Promise<void> {
+  const files = await directComponentCount(dirAbs);
+  if (files > 0) out.push({ dir: dirRel, files });
+  if (depth === 0) return;
+
+  let entries: import("fs").Dirent[];
+  try {
+    entries = await fs.readdir(dirAbs, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || EXCLUDED_DIRS.has(entry.name)) continue;
+    await collectComponentDirs(path.join(dirAbs, entry.name), `${dirRel}/${entry.name}`, depth - 1, out);
+  }
 }
 
 /** Count component files directly inside a directory (non-recursive). */
@@ -351,15 +333,5 @@ async function pathExists(target: string): Promise<boolean> {
     return true;
   } catch {
     return false;
-  }
-}
-
-async function readPackageDeps(workspaceRoot: string): Promise<Record<string, string>> {
-  try {
-    const content = await fs.readFile(path.join(workspaceRoot, "package.json"), "utf-8");
-    const pkg = JSON.parse(content);
-    return { ...pkg.dependencies, ...pkg.devDependencies };
-  } catch {
-    return {};
   }
 }

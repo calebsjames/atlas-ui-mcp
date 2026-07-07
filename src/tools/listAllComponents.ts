@@ -1,7 +1,7 @@
 import type { ComponentScanner } from "../scanner/componentScanner.js";
 import type { CacheManager } from "../cache/cacheManager.js";
 import type { ArchitectureLayer, Component } from "../types.js";
-import { ensureCatalog, toSummary, type CatalogItemSummary } from "./shared.js";
+import { countByLayer, ensureCatalog, toSummary, type CatalogItemSummary } from "./shared.js";
 
 export interface ListAllComponentsResult {
   totalCount: number;
@@ -25,11 +25,7 @@ export async function listAllComponents(
 ): Promise<ListAllComponentsResult> {
   const catalog = await ensureCatalog(scanner, cache);
 
-  const byLayer: Record<string, number> = {};
-  for (const component of catalog.components) {
-    byLayer[component.architectureLayer] =
-      (byLayer[component.architectureLayer] || 0) + 1;
-  }
+  const byLayer = countByLayer(catalog.components);
 
   const filtered = opts?.layer
     ? catalog.components.filter((c) => c.architectureLayer === opts.layer)

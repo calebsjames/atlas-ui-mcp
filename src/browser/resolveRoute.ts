@@ -3,7 +3,9 @@ import type { RouteAnalyzer } from "../analyzer/routeAnalyzer.js";
 import type { ComponentScanner } from "../scanner/componentScanner.js";
 import type { CacheManager } from "../cache/cacheManager.js";
 import { getRouteMap, type RouteMapEntry } from "../tools/getRouteMap.js";
+import { findByLayers, ROUTE_OWNER_LAYERS } from "../tools/shared.js";
 import { detectViewGate, type ViewGate } from "./viewGate.js";
+import { toAbsoluteUrl } from "../util.js";
 
 export interface ResolvedRoute {
   url: string;
@@ -128,9 +130,7 @@ async function detectGateInPage(
   childName: string,
   cache: CacheManager
 ): Promise<ViewGate | null> {
-  const page = cache
-    .getByName(match.component)
-    .find((c) => c.architectureLayer === "page" || c.architectureLayer === "component");
+  const page = findByLayers(cache.getByName(match.component), ROUTE_OWNER_LAYERS);
   if (!page) return null;
   try {
     const source = await fs.readFile(page.path, "utf-8");
@@ -162,7 +162,5 @@ function fillSegments(
     return guess;
   });
 
-  const base = baseUrl.replace(/\/$/, "");
-  const pathPart = replaced.startsWith("/") ? replaced : `/${replaced}`;
-  return { url: base + pathPart, filled, guessed };
+  return { url: toAbsoluteUrl(baseUrl, replaced), filled, guessed };
 }

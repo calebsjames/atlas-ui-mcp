@@ -6,6 +6,7 @@ import type { CacheManager } from "../cache/cacheManager.js";
 import type { BrowserConfig } from "../types.js";
 import { resolveRoute } from "../browser/resolveRoute.js";
 import type { McpContentResult } from "../browser/response.js";
+import { toAbsoluteUrl } from "../util.js";
 
 export interface FlowStep {
   /** Navigation target for this step: a catalog component, a route path, or an absolute URL. */
@@ -58,9 +59,7 @@ export async function captureFlow(
     let url: string | undefined;
     if (step.url) {
       // Accept absolute URLs or dev-server-relative paths, like check_page does.
-      url = step.url.startsWith("http")
-        ? step.url
-        : session.baseUrl.replace(/\/$/, "") + (step.url.startsWith("/") ? step.url : `/${step.url}`);
+      url = toAbsoluteUrl(session.baseUrl, step.url);
     } else if (step.component || step.route) {
       const r = await resolveRoute(
         {

@@ -8,6 +8,7 @@ import type { RouteAnalyzer } from "../analyzer/routeAnalyzer.js";
 import type { BrowserConfig, Component } from "../types.js";
 import { ensureCatalog } from "./shared.js";
 import { getRouteMap } from "./getRouteMap.js";
+import { errMessage, toAbsoluteUrl } from "../util.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -110,7 +111,7 @@ export async function whatsAffected(
         error:
           "Could not run `git status` to auto-detect changed files. Pass `files` " +
           "explicitly as workspace-relative paths (e.g. src/components/Foo.tsx).",
-        details: err instanceof Error ? err.message : String(err),
+        details: errMessage(err),
       };
     }
   }
@@ -367,7 +368,8 @@ async function resolveAffectedRoutes(
     routes.push({
       path: route.path,
       component: route.component,
-      url: buildUrl(devServerUrl, route.path),
+      // Dev-server URL with `:params` preserved for the agent to fill.
+      url: toAbsoluteUrl(devServerUrl, route.path),
       isProtected: route.isProtected,
       ...(route.protection ? { protection: route.protection } : {}),
       ...(route.dynamicSegments?.length ? { dynamicSegments: route.dynamicSegments } : {}),
@@ -468,11 +470,4 @@ async function noteForUnmatched(rel: string, workspaceRoot: string): Promise<str
     return "route definition file — not a catalog item; its routes surface via affectedRoutes";
   }
   return "not in catalog — likely outside configured scanTargets (see .atlas-ui.json)";
-}
-
-/** Join a dev-server base with a route path, preserving `:params`. */
-function buildUrl(base: string, routePath: string): string {
-  const trimmed = base.replace(/\/$/, "");
-  const suffix = routePath.startsWith("/") ? routePath : `/${routePath}`;
-  return trimmed + suffix;
 }

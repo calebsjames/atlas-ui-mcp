@@ -1,7 +1,7 @@
 import type { RouteAnalyzer } from "../analyzer/routeAnalyzer.js";
 import type { ComponentScanner } from "../scanner/componentScanner.js";
 import type { CacheManager } from "../cache/cacheManager.js";
-import { ensureCatalog } from "./shared.js";
+import { ensureCatalog, findByLayers, ROUTE_OWNER_LAYERS } from "./shared.js";
 
 export interface RouteMapEntry {
   path: string;
@@ -32,10 +32,7 @@ export async function getRouteMap(
   await ensureCatalog(scanner, cache);
 
   return routes.map((route) => {
-    const matches = cache.getByName(route.component);
-    const page = matches.find(
-      (c) => c.architectureLayer === "page" || c.architectureLayer === "component"
-    );
+    const page = findByLayers(cache.getByName(route.component), ROUTE_OWNER_LAYERS);
 
     const entry: RouteMapEntry = {
       path: route.path,

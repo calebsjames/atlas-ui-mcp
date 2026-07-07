@@ -1,6 +1,7 @@
 import fs from "fs/promises";
 import path from "path";
 import type { ProjectConfig, ScanTarget } from "../types.js";
+import { readPackageDeps } from "../util.js";
 
 const CONFIG_FILENAME = ".atlas-ui.json";
 
@@ -35,24 +36,13 @@ const VUE_ROUTE_FILES = ["src/router/index.ts", "src/router/index.js"];
  * Detect the framework used in the workspace by checking package.json dependencies
  */
 async function detectFramework(workspaceRoot: string): Promise<Framework> {
-  try {
-    const pkgPath = path.join(workspaceRoot, "package.json");
-    const content = await fs.readFile(pkgPath, "utf-8");
-    const pkg = JSON.parse(content);
-    const allDeps = {
-      ...pkg.dependencies,
-      ...pkg.devDependencies,
-    };
+  const deps = await readPackageDeps(workspaceRoot);
+  const hasReact = "react" in deps;
+  const hasVue = "vue" in deps;
 
-    const hasReact = "react" in allDeps;
-    const hasVue = "vue" in allDeps;
-
-    if (hasReact && hasVue) return "both";
-    if (hasVue) return "vue";
-    return "react";
-  } catch {
-    return "react";
-  }
+  if (hasReact && hasVue) return "both";
+  if (hasVue) return "vue";
+  return "react";
 }
 
 /**

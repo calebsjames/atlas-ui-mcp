@@ -1,6 +1,8 @@
 import fs from "fs/promises";
 import path from "path";
 import type { RouteEntry } from "../types.js";
+import { dedupeRoutes, extractDynamicSegments } from "./routeUtils.js";
+import { readPackageDeps } from "../util.js";
 
 /**
  * File-based routing analyzer for frameworks that derive routes from the
@@ -193,13 +195,6 @@ function makeRoute(routePath: string, component: string, parentLayout?: string):
   };
 }
 
-/** Extract `:param` names (and `*` for catch-alls) from a route path. */
-function extractDynamicSegments(routePath: string): string[] {
-  const segments = [...routePath.matchAll(/:([a-zA-Z_][a-zA-Z0-9_]*)/g)].map((m) => m[1]);
-  if (routePath.includes("*")) segments.push("*");
-  return segments;
-}
-
 const DEFAULT_FN_EXPORT = /export\s+default\s+(?:async\s+)?function\s+([A-Za-z_][A-Za-z0-9_]*)/;
 const DEFAULT_CLASS_EXPORT = /export\s+default\s+class\s+([A-Za-z_][A-Za-z0-9_]*)/;
 const DEFAULT_IDENT_EXPORT = /export\s+default\s+([A-Za-z_][A-Za-z0-9_]*)\s*;/;
@@ -258,24 +253,3 @@ function deriveLayoutName(rawSegments: string[]): string {
   return (base || "Root") + "Layout";
 }
 
-/** Drop routes sharing an identical path + component pair. */
-function dedupeRoutes(routes: RouteEntry[]): RouteEntry[] {
-  const seen = new Set<string>();
-  return routes.filter((route) => {
-    const key = `${route.path}:${route.component}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
-/** Read merged dependencies + devDependencies from the workspace package.json. */
-async function readPackageDeps(workspaceRoot: string): Promise<Record<string, string>> {
-  try {
-    const content = await fs.readFile(path.join(workspaceRoot, "package.json"), "utf-8");
-    const pkg = JSON.parse(content);
-    return { ...pkg.dependencies, ...pkg.devDependencies };
-  } catch {
-    return {};
-  }
-}

@@ -1,7 +1,7 @@
 import type { ComponentScanner } from "../scanner/componentScanner.js";
 import type { CacheManager } from "../cache/cacheManager.js";
 import type { Component } from "../types.js";
-import { ensureCatalog } from "./shared.js";
+import { ensureCatalog, matchesFile } from "./shared.js";
 
 /**
  * Cross-component dead event wiring: a parent binds `@some-event` on a child
@@ -38,11 +38,9 @@ export async function findDanglingListeners(
     else byName.set(key, [c]);
   }
 
-  const parents = catalog.components.filter((c) => {
-    if (!c.childEventBindings?.length) return false;
-    if (args.file && !c.relativePath.includes(args.file) && !c.path.includes(args.file)) return false;
-    return true;
-  });
+  const parents = catalog.components.filter(
+    (c) => c.childEventBindings?.length && matchesFile(c, args.file)
+  );
 
   const dangling: DanglingListener[] = [];
   let unresolvedChildren = 0;

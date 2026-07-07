@@ -14,7 +14,6 @@ export class CacheManager {
 
   // Indexes for O(1) lookups (rebuilt on catalog change)
   private nameIndex: Map<string, Component[]> = new Map();
-  private layerIndex: Map<string, Component[]> = new Map();
   private importIndex: Map<string, Component[]> = new Map();
   private childIndex: Map<string, Component[]> = new Map();
   // Keyed by imported module PATH (workspace-relative, extensionless) — finds
@@ -50,13 +49,6 @@ export class CacheManager {
    */
   getByName(name: string): Component[] {
     return this.nameIndex.get(name.toLowerCase()) || [];
-  }
-
-  /**
-   * O(1) lookup by architecture layer
-   */
-  getByLayer(layer: string): Component[] {
-    return this.layerIndex.get(layer) || [];
   }
 
   /**
@@ -128,50 +120,6 @@ export class CacheManager {
     this.propCache.set(filePath, { hash, props });
   }
 
-  /**
-   * Invalidate props cache for a file
-   */
-  invalidateProps(filePath: string): void {
-    this.propCache.delete(filePath);
-  }
-
-  /**
-   * Clear all caches
-   */
-  clearAll(): void {
-    this.catalogCache = null;
-    this.propCache.clear();
-    this.clearIndexes();
-  }
-
-  /**
-   * Get cache statistics
-   */
-  getStats(): {
-    catalogCached: boolean;
-    propsCacheSize: number;
-    indexSizes: {
-      name: number;
-      layer: number;
-      import: number;
-      child: number;
-    };
-  } {
-    return {
-      catalogCached: this.catalogCache !== null,
-      propsCacheSize: this.propCache.size,
-      indexSizes: {
-        name: this.nameIndex.size,
-        layer: this.layerIndex.size,
-        import: this.importIndex.size,
-        child: this.childIndex.size,
-      },
-    };
-  }
-
-  /**
-   * Rebuild all indexes from catalog
-   */
   private addToIndex(index: Map<string, Component[]>, key: string, component: Component): void {
     if (!index.has(key)) {
       index.set(key, []);
@@ -181,7 +129,6 @@ export class CacheManager {
 
   private clearIndexes(): void {
     this.nameIndex.clear();
-    this.layerIndex.clear();
     this.importIndex.clear();
     this.childIndex.clear();
     this.fileImportIndex.clear();
@@ -196,7 +143,6 @@ export class CacheManager {
       if (component.fileAlias) {
         this.addToIndex(this.nameIndex, component.fileAlias.toLowerCase(), component);
       }
-      this.addToIndex(this.layerIndex, component.architectureLayer, component);
 
       const importedNames = (component.imports || []).flatMap((imp) => imp.names);
       for (const name of importedNames) {

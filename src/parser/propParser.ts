@@ -2,6 +2,7 @@ import ts from "typescript";
 import fs from "fs/promises";
 import path from "path";
 import type { ComponentProps, PropInfo } from "../types.js";
+import { extractVueScript } from "../analyzer/vueTemplate.js";
 
 /**
  * TypeScript Prop Parser
@@ -20,8 +21,7 @@ export class PropParser {
 
       // For .vue files, extract <script> block before parsing
       if (isVue) {
-        const scriptMatch = content.match(/<script\b[^>]*>([\s\S]*?)<\/script>/);
-        content = scriptMatch ? scriptMatch[1] : "";
+        content = extractVueScript(content);
         if (!content.trim()) return { componentName, props: {} };
       }
 
@@ -91,9 +91,7 @@ export class PropParser {
   ): [string, PropInfo] | null {
     if (!ts.isPropertySignature(member) || !member.name) return null;
     const propName = member.name.getText(sourceFile);
-    const type = member.type
-      ? this.getTypeAsString(member.type, sourceFile)
-      : "unknown";
+    const type = member.type ? member.type.getText(sourceFile) : "unknown";
     return [propName, {
       type,
       required: !member.questionToken,
@@ -381,30 +379,10 @@ export class PropParser {
         ts.isObjectLiteralExpression(node.initializer)
       ) {
         const props: Record<string, PropInfo> = {};
-
         for (const prop of node.initializer.properties) {
           if (!ts.isPropertyAssignment(prop) || !ts.isIdentifier(prop.name)) continue;
-          const propName = prop.name.text;
-
-          if (ts.isObjectLiteralExpression(prop.initializer)) {
-            let type = "unknown";
-            let required = false;
-            let defaultValue: string | undefined;
-
-            for (const inner of prop.initializer.properties) {
-              if (!ts.isPropertyAssignment(inner) || !ts.isIdentifier(inner.name)) continue;
-              if (inner.name.text === "type") type = inner.initializer.getText(sourceFile);
-              if (inner.name.text === "required" && inner.initializer.kind === ts.SyntaxKind.TrueKeyword) required = true;
-              if (inner.name.text === "default") defaultValue = inner.initializer.getText(sourceFile);
-            }
-
-            props[propName] = { type, required, defaultValue };
-          } else {
-            // Shorthand: propName: String
-            props[propName] = { type: prop.initializer.getText(sourceFile), required: false };
-          }
+          props[prop.name.text] = this.parseOptionsApiProp(prop.initializer, sourceFile);
         }
-
         result = { componentName, props };
       }
 
@@ -416,10 +394,25 @@ export class PropParser {
   }
 
   /**
-   * Convert TypeScript type node to string
+   * One Options API prop value: either the long form
+   * `{ type: String, required: true, default: "x" }` or the shorthand `String`.
    */
-  private getTypeAsString(typeNode: ts.TypeNode, sourceFile: ts.SourceFile): string {
-    return typeNode.getText(sourceFile);
+  private parseOptionsApiProp(value: ts.Expression, sourceFile: ts.SourceFile): PropInfo {
+    if (!ts.isObjectLiteralExpression(value)) {
+      // Shorthand: propName: String
+      return { type: value.getText(sourceFile), required: false };
+    }
+
+    let type = "unknown";
+    let required = false;
+    let defaultValue: string | undefined;
+    for (const inner of value.properties) {
+      if (!ts.isPropertyAssignment(inner) || !ts.isIdentifier(inner.name)) continue;
+      if (inner.name.text === "type") type = inner.initializer.getText(sourceFile);
+      if (inner.name.text === "required" && inner.initializer.kind === ts.SyntaxKind.TrueKeyword) required = true;
+      if (inner.name.text === "default") defaultValue = inner.initializer.getText(sourceFile);
+    }
+    return { type, required, defaultValue };
   }
 
   /**

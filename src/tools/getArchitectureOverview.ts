@@ -2,7 +2,7 @@ import type { ComponentScanner } from "../scanner/componentScanner.js";
 import type { CacheManager } from "../cache/cacheManager.js";
 import type { RouteAnalyzer } from "../analyzer/routeAnalyzer.js";
 import type { ArchitectureLayer } from "../types.js";
-import { ensureCatalog } from "./shared.js";
+import { countByLayer, ensureCatalog } from "./shared.js";
 
 export interface ArchitectureOverview {
   summary: {
@@ -39,49 +39,40 @@ export async function getArchitectureOverview(
 
   const routes = await routeAnalyzer.analyzeRoutes();
 
-  // Count by layer
-  const byLayer: Record<string, number> = {};
+  const byLayer = countByLayer(catalog.components);
   const byCategory: Record<string, number> = {};
-
   for (const item of catalog.components) {
-    byLayer[item.architectureLayer] =
-      (byLayer[item.architectureLayer] || 0) + 1;
     byCategory[item.category] = (byCategory[item.category] || 0) + 1;
   }
 
   // Build layer summaries
   const layerItems = (layer: ArchitectureLayer) =>
     catalog.components.filter((c) => c.architectureLayer === layer);
+  const namedLayer = (layer: ArchitectureLayer) => {
+    const items = layerItems(layer);
+    return { count: items.length, names: items.map((i) => i.name) };
+  };
 
   const components = layerItems("component");
   const pages = layerItems("page");
   const hooks = layerItems("hook");
-  const services = layerItems("service");
-  const adapters = layerItems("adapter");
-  const contexts = layerItems("context");
-  const stores = layerItems("store");
-  const dtos = layerItems("dto");
-  const types = layerItems("type");
 
   // Build data flow chains (page -> hook -> service -> adapter)
   const dataFlowChains: string[] = [];
   for (const page of pages) {
     for (const hookImport of page.imports || []) {
-      if (hookImport.source.includes("hooks") || hookImport.source.includes("composables")) {
-        const hookName = hookImport.names[0];
-        const hook = hooks.find(
-          (h) => h.name.toLowerCase() === hookName?.toLowerCase()
-        );
-        if (hook) {
-          for (const serviceCall of hook.adapterCalls || []) {
-            dataFlowChains.push(
-              `${page.name} -> ${hook.name} -> ${serviceCall}`
-            );
-          }
-          if (!hook.adapterCalls?.length) {
-            dataFlowChains.push(`${page.name} -> ${hook.name}`);
-          }
-        }
+      if (!hookImport.source.includes("hooks") && !hookImport.source.includes("composables")) {
+        continue;
+      }
+      const hookName = hookImport.names[0];
+      const hook = hooks.find((h) => h.name.toLowerCase() === hookName?.toLowerCase());
+      if (!hook) continue;
+      if (!hook.adapterCalls?.length) {
+        dataFlowChains.push(`${page.name} -> ${hook.name}`);
+        continue;
+      }
+      for (const serviceCall of hook.adapterCalls) {
+        dataFlowChains.push(`${page.name} -> ${hook.name} -> ${serviceCall}`);
       }
     }
   }
@@ -108,32 +99,14 @@ export async function getArchitectureOverview(
         count: components.length,
         categories: [...new Set(components.map((c) => c.category))],
       },
-      pages: { count: pages.length, names: pages.map((p) => p.name) },
-      hooks: { count: hooks.length, names: hooks.map((h) => h.name) },
-      services: {
-        count: services.length,
-        names: services.map((s) => s.name),
-      },
-      adapters: {
-        count: adapters.length,
-        names: adapters.map((a) => a.name),
-      },
-      contexts: {
-        count: contexts.length,
-        names: contexts.map((c) => c.name),
-      },
-      stores: {
-        count: stores.length,
-        names: stores.map((s) => s.name),
-      },
-      dtos: {
-        count: dtos.length,
-        names: dtos.map((d) => d.name),
-      },
-      types: {
-        count: types.length,
-        names: types.map((t) => t.name),
-      },
+      pages: namedLayer("page"),
+      hooks: namedLayer("hook"),
+      services: namedLayer("service"),
+      adapters: namedLayer("adapter"),
+      contexts: namedLayer("context"),
+      stores: namedLayer("store"),
+      dtos: namedLayer("dto"),
+      types: namedLayer("type"),
     },
     dataFlowChains: [...new Set(dataFlowChains)].slice(0, 30),
     ...(hasPhiData ? { phiViolationCount } : {}),

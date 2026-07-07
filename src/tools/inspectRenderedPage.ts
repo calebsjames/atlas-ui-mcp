@@ -4,8 +4,9 @@ import type { ComponentScanner } from "../scanner/componentScanner.js";
 import type { CacheManager } from "../cache/cacheManager.js";
 import type { BrowserConfig } from "../types.js";
 import { resolveRoute } from "../browser/resolveRoute.js";
-import { ensureCatalog } from "./shared.js";
+import { ensureCatalog, findByLayers, RENDERABLE_LAYERS } from "./shared.js";
 import type { McpContentResult } from "../browser/response.js";
+import { toAbsoluteUrl } from "../util.js";
 
 /** What the in-page walk returns — a framework tag plus a per-name count map. */
 interface RenderedComponents {
@@ -36,9 +37,7 @@ export async function inspectRenderedPage(
   // route map, exactly like render_component.
   let url: string;
   if (args.url) {
-    url = args.url.startsWith("http")
-      ? args.url
-      : session.baseUrl.replace(/\/$/, "") + (args.url.startsWith("/") ? args.url : `/${args.url}`);
+    url = toAbsoluteUrl(session.baseUrl, args.url);
   } else if (args.component || args.route) {
     const resolved = await resolveRoute(
       {
@@ -140,13 +139,7 @@ export async function inspectRenderedPage(
     const matches = cache.getByName(name);
     // Prefer a renderable layer when a name collides (a page/component over a
     // like-named type/dto), else fall back to whatever matched first.
-    const comp =
-      matches.find(
-        (m) =>
-          m.architectureLayer === "component" ||
-          m.architectureLayer === "page" ||
-          m.architectureLayer === "context"
-      ) || matches[0];
+    const comp = findByLayers(matches, RENDERABLE_LAYERS) || matches[0];
     if (comp) {
       mounted.push({
         name: comp.name,

@@ -9,6 +9,7 @@ import type {
   ProjectConfig,
 } from "../types.js";
 import { DEFAULT_SCAN_TARGETS } from "../config/configLoader.js";
+import { matchesExclude } from "../util.js";
 
 /**
  * Component Scanner
@@ -222,13 +223,7 @@ export class ComponentScanner {
    * Check if a filename matches any exclude pattern
    */
   private isExcluded(name: string): boolean {
-    return this.excludePatterns.some((pattern) => {
-      if (!pattern.includes("*")) return name === pattern;
-      const regex = new RegExp(
-        "^" + pattern.replace(/\./g, "\\.").replace(/\*/g, ".*") + "$"
-      );
-      return regex.test(name);
-    });
+    return matchesExclude(name, this.excludePatterns);
   }
 
   /**

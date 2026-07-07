@@ -49,6 +49,10 @@ export async function findComponentUsages(
     "g"
   );
 
+  const hookCallRegex = name.startsWith("use")
+    ? new RegExp(`\\b${escapedName}\\s*\\(`, "g")
+    : null;
+
   const importers = cache.getImportersOf(name);
   const renderers = cache.getRenderersOf(name);
 
@@ -73,9 +77,7 @@ export async function findComponentUsages(
     );
   }
 
-  if (name.startsWith("use")) {
-    const hookCallRegex = new RegExp(`\\b${escapedName}\\s*\\(`, "g");
-
+  if (hookCallRegex) {
     for (const comp of catalog.components) {
       if (comp.name.toLowerCase() === name.toLowerCase()) continue;
       if (candidateSet.has(comp.path)) continue;
@@ -83,18 +85,7 @@ export async function findComponentUsages(
 
       const content = await readFileSafe(comp.path);
       if (!content) continue;
-
-      const lines = content.split("\n");
-      for (let idx = 0; idx < lines.length; idx++) {
-        hookCallRegex.lastIndex = 0;
-        if (!hookCallRegex.test(lines[idx])) continue;
-        usages.push({
-          file: comp.relativePath,
-          component: comp.name,
-          line: idx + 1,
-          usageType: "import",
-        });
-      }
+      scanLinesForHookCalls(content, comp.relativePath, comp.name, hookCallRegex, usages);
     }
   }
 
@@ -103,24 +94,11 @@ export async function findComponentUsages(
   // rendered. Scan their raw content with the same patterns so those real
   // usages aren't invisible.
   const referenceFiles = await loadReferenceContents(workspaceRoot, config);
-  const hookCallRegex = name.startsWith("use")
-    ? new RegExp(`\\b${escapedName}\\s*\\(`, "g")
-    : null;
   for (const [relativePath, content] of referenceFiles) {
     const componentName = path.basename(relativePath, path.extname(relativePath));
     scanFileForUsages(content, relativePath, componentName, jsxRegex, importRegex, usages);
     if (hookCallRegex) {
-      const lines = content.split("\n");
-      for (let idx = 0; idx < lines.length; idx++) {
-        hookCallRegex.lastIndex = 0;
-        if (!hookCallRegex.test(lines[idx])) continue;
-        usages.push({
-          file: relativePath,
-          component: componentName,
-          line: idx + 1,
-          usageType: "import",
-        });
-      }
+      scanLinesForHookCalls(content, relativePath, componentName, hookCallRegex, usages);
     }
   }
 
@@ -138,6 +116,27 @@ async function readFileSafe(filePath: string): Promise<string | null> {
     return await fs.readFile(filePath, "utf-8");
   } catch {
     return null;
+  }
+}
+
+/** Record an "import"-type usage for every line where the hook is called. */
+function scanLinesForHookCalls(
+  content: string,
+  relativePath: string,
+  componentName: string,
+  hookCallRegex: RegExp,
+  usages: ComponentUsage[]
+): void {
+  const lines = content.split("\n");
+  for (let idx = 0; idx < lines.length; idx++) {
+    hookCallRegex.lastIndex = 0;
+    if (!hookCallRegex.test(lines[idx])) continue;
+    usages.push({
+      file: relativePath,
+      component: componentName,
+      line: idx + 1,
+      usageType: "import",
+    });
   }
 }
 

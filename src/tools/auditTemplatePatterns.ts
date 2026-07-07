@@ -1,7 +1,7 @@
 import type { ComponentScanner } from "../scanner/componentScanner.js";
 import type { CacheManager } from "../cache/cacheManager.js";
 import type { Component, ProjectConfig, TemplatePatterns } from "../types.js";
-import { ensureCatalog } from "./shared.js";
+import { ensureCatalog, matchesFile } from "./shared.js";
 
 /**
  * Repo-wide template-layer drift audit — the "grep battery in one call" for
@@ -31,7 +31,7 @@ export async function auditTemplatePatterns(
   const maxZIndex = config.templatePatterns?.maxZIndex;
 
   const targets = catalog.components.filter(
-    (c) => c.templatePatterns && (!args.file || c.relativePath.includes(args.file) || c.path.includes(args.file))
+    (c) => c.templatePatterns && matchesFile(c, args.file)
   );
 
   const allFindings: Finding[] = [];
