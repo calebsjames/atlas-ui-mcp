@@ -1,4 +1,4 @@
-import type { CaptureResult } from "./session.js";
+import type { CaptureResult } from "./types.js";
 
 /**
  * An MCP tool result with mixed content. The server detects this shape and

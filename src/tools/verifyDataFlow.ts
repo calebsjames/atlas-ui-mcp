@@ -1,4 +1,5 @@
-import type { BrowserSession, FlowAction, NetworkEntry } from "../browser/session.js";
+import type { BrowserSession } from "../browser/session.js";
+import type { FlowAction, NetworkEntry } from "../browser/types.js";
 import type { RouteAnalyzer } from "../analyzer/routeAnalyzer.js";
 import type { ComponentScanner } from "../scanner/componentScanner.js";
 import type { CacheManager } from "../cache/cacheManager.js";
