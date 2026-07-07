@@ -25,7 +25,6 @@ import { verifyDataFlow } from "../tools/verifyDataFlow.js";
 import { captureFlow } from "../tools/captureFlow.js";
 import { inspectRenderedPage } from "../tools/inspectRenderedPage.js";
 import { whatsAffected } from "../tools/whatsAffected.js";
-import { intelStatus } from "../tools/intelStatus.js";
 
 /** Everything a tool handler might need, wired up once at startup. */
 export interface ToolContext {
@@ -213,9 +212,6 @@ const HANDLERS: Record<string, ToolHandler> = {
       },
       ctx.scanner, ctx.cache, ctx.routeAnalyzer, ctx.workspaceRoot, ctx.browserConfig
     ),
-
-  intel_status: (_args, ctx) =>
-    intelStatus(ctx.config, ctx.workspaceRoot, ctx.scanner, ctx.cache, ctx.routeAnalyzer, ctx.browser),
 };
 
 function jsonResponse(data: unknown) {

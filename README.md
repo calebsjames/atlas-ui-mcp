@@ -124,9 +124,6 @@ Drop a `.atlas-ui.json` in your project root to customize scanning. If you don't
 
 ## Tools
 
-### `intel_status`
-The doctor. Detected framework, scan targets with per-directory file counts, catalog totals by layer, route counts, dev-server reachability, Playwright/login state — and actionable warnings. If any tool returns empty or surprising results, call this first: an empty catalog almost always means `scanTargets` don't match the project layout, and the warnings list candidate directories to add.
-
 ### `list_all_components`
 Compact catalog listing: `{ totalCount, lastScanned, byLayer, components }` where each entry is a summary (name, layer, category, path, description, route). Filter with `layer`; pass `verbose: true` for full metadata objects.
 

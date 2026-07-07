@@ -299,14 +299,4 @@ export const CATALOG_TOOLS = [
       required: [],
     },
   },
-  {
-    name: "intel_status",
-    description:
-      "Health check for this MCP server: detected framework, scan targets with per-directory file counts, catalog totals by layer, route file/route counts, dev-server reachability, Playwright/login state, and actionable warnings (e.g. an empty catalog with candidate directories to add to .atlas-ui.json). Call this FIRST if any tool returns empty/unexpected results — an empty catalog usually means misconfigured scanTargets, not an empty codebase.",
-    inputSchema: {
-      type: "object",
-      properties: {},
-      required: [],
-    },
-  },
 ];

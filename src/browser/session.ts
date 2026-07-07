@@ -138,19 +138,9 @@ export class BrowserSession {
     }
   }
 
-  /** Whether the login pre-step has run successfully this session. */
-  get authenticated(): boolean {
-    return this.loggedIn;
-  }
-
   /** Whether a `browser.login` flow is configured at all. */
   get loginConfigured(): boolean {
     return !!this.config.login;
-  }
-
-  /** The last login failure message, if login was attempted and failed. */
-  get loginFailure(): string | null {
-    return this.loginError;
   }
 
   /**
