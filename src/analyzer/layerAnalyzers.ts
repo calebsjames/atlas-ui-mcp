@@ -13,6 +13,62 @@ function isAdapterOrServiceName(name: string): boolean {
   return /(?:Adapter|Service)/i.test(name);
 }
 
+/** Append `value` to the set at `key`, creating the set on first use. */
+export function addToSetMap(map: Map<string, Set<string>>, key: string, value: string): void {
+  if (!map.has(key)) map.set(key, new Set());
+  map.get(key)!.add(value);
+}
+
+/** Map<string, Set> → plain sorted Record, or undefined when empty. */
+export function setMapToRecord(map: Map<string, Set<string>>): Record<string, string[]> | undefined {
+  if (map.size === 0) return undefined;
+  const record: Record<string, string[]> = {};
+  for (const key of [...map.keys()].sort()) {
+    record[key] = [...map.get(key)!].sort();
+  }
+  return record;
+}
+
+/**
+ * `someAdapter.method()` / `someService.method()` — the callee/method pair of
+ * a call on an adapter/service-ish object, so data-flow tracing can scope the
+ * callee's endpoint surface to what this caller actually invokes. Exported for
+ * the component analyzer: components call services directly too, and without
+ * this attribution their chains fall back to the full endpoint surface.
+ */
+export function adapterMethodCallOf(
+  node: ts.CallExpression
+): { callee: string; method: string } | undefined {
+  if (
+    ts.isPropertyAccessExpression(node.expression) &&
+    ts.isIdentifier(node.expression.expression) &&
+    isAdapterOrServiceName(node.expression.expression.text)
+  ) {
+    return { callee: node.expression.expression.text, method: node.expression.name.text };
+  }
+  return undefined;
+}
+
+/**
+ * Name of the exported function/method this node DECLARES, if any — used to
+ * maintain an enclosing-function stack so endpoints can be attributed to the
+ * adapter method that owns them. Covers function declarations, object-literal
+ * and class methods, and `name: () => {}` / `const name = () => {}` forms.
+ */
+function declaredFunctionName(node: ts.Node): string | undefined {
+  if (ts.isFunctionDeclaration(node) && node.name) return node.name.text;
+  if (ts.isMethodDeclaration(node) && ts.isIdentifier(node.name)) return node.name.text;
+  if (
+    (ts.isPropertyAssignment(node) || ts.isVariableDeclaration(node)) &&
+    ts.isIdentifier(node.name) &&
+    node.initializer &&
+    (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))
+  ) {
+    return node.name.text;
+  }
+  return undefined;
+}
+
 function extractHookSignature(
   params: ts.NodeArray<ts.ParameterDeclaration>,
   returnType: ts.TypeNode | undefined,
@@ -42,6 +98,7 @@ export function analyzeHook(sourceFile: ts.SourceFile): Partial<ComponentAnalysi
   const result: Partial<ComponentAnalysis> = {};
   const queryKeys: string[] = [];
   const adapterCalls = new Set<string>();
+  const methodCalls = new Map<string, Set<string>>();
 
   const visit = (node: ts.Node) => {
     // Function declaration hooks: export function useXxx(...) { ... }
@@ -83,6 +140,7 @@ export function analyzeHook(sourceFile: ts.SourceFile): Partial<ComponentAnalysi
       isAdapterOrServiceName(node.expression.expression.text)
     ) {
       adapterCalls.add(node.expression.expression.text);
+      addToSetMap(methodCalls, node.expression.expression.text, node.expression.name.text);
     }
 
     // Adapter/service detection from imports
@@ -101,6 +159,8 @@ export function analyzeHook(sourceFile: ts.SourceFile): Partial<ComponentAnalysi
 
   if (queryKeys.length > 0) result.queryKeys = queryKeys;
   if (adapterCalls.size > 0) result.adapterCalls = Array.from(adapterCalls).sort();
+  const methodCallRecord = setMapToRecord(methodCalls);
+  if (methodCallRecord) result.methodCalls = methodCallRecord;
 
   return result;
 }
@@ -113,10 +173,38 @@ export function analyzeServiceOrAdapter(
   const result: Partial<ComponentAnalysis> = {};
   const endpoints: string[] = [];
   const dtos = new Set<string>();
+  const endpointsByMethod = new Map<string, Set<string>>();
+  const methodCalls = new Map<string, Set<string>>();
+  // Per exported method, which callee.method pairs it delegates to — so a
+  // trace entering via one service method doesn't inherit the adapter calls
+  // of every OTHER method in the file (a CRUD service would otherwise drag
+  // its POST/DELETE surface into read-only chains).
+  const delegatesByMethod = new Map<string, Map<string, Set<string>>>();
+  // Enclosing named function/method during traversal — the innermost one owns
+  // any endpoint found beneath it, giving per-method endpoint attribution.
+  const fnStack: string[] = [];
 
   const visit = (node: ts.Node) => {
+    const fnName = declaredFunctionName(node);
+    if (fnName) fnStack.push(fnName);
+
     if (ts.isCallExpression(node)) {
-      endpoints.push(...extractEndpointsFromCall(node, sourceFile));
+      const found = extractEndpointsFromCall(node, sourceFile);
+      endpoints.push(...found);
+      const owner = fnStack[fnStack.length - 1];
+      if (owner) {
+        for (const endpoint of found) addToSetMap(endpointsByMethod, owner, endpoint);
+      }
+      // Services delegating to adapters: record which adapter methods fire,
+      // file-wide and attributed to the enclosing service method.
+      const delegated = adapterMethodCallOf(node);
+      if (delegated) {
+        addToSetMap(methodCalls, delegated.callee, delegated.method);
+        if (owner) {
+          if (!delegatesByMethod.has(owner)) delegatesByMethod.set(owner, new Map());
+          addToSetMap(delegatesByMethod.get(owner)!, delegated.callee, delegated.method);
+        }
+      }
     }
 
     // Detect DTO type references
@@ -125,12 +213,24 @@ export function analyzeServiceOrAdapter(
     }
 
     ts.forEachChild(node, visit);
+    if (fnName) fnStack.pop();
   };
 
   visit(sourceFile);
 
   if (endpoints.length > 0) {
     result.apiEndpoints = [...new Set(endpoints)];
+  }
+  const byMethod = setMapToRecord(endpointsByMethod);
+  if (byMethod) result.endpointsByMethod = byMethod;
+  const methodCallRecord = setMapToRecord(methodCalls);
+  if (methodCallRecord) result.methodCalls = methodCallRecord;
+  if (delegatesByMethod.size > 0) {
+    const record: Record<string, Record<string, string[]>> = {};
+    for (const key of [...delegatesByMethod.keys()].sort()) {
+      record[key] = setMapToRecord(delegatesByMethod.get(key)!)!;
+    }
+    result.delegatesByMethod = record;
   }
 
   // Mock detection
@@ -226,6 +326,10 @@ function resolveTemplateEndpoint(
   }
 
   path = path.replace(/\/{2,}/g, "/").trim();
+  // Prose templates (log/error messages with interpolations) are not URLs —
+  // without this, `\`Error fetching ${id}\`` got "/"-prefixed into a fake
+  // endpoint that polluted every downstream endpoint list.
+  if (/\s/.test(path)) return undefined;
   if (path && !path.startsWith("/") && !path.startsWith("{")) path = "/" + path;
 
   // Reject if no static (non-placeholder) path segment survives.

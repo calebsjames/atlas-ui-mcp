@@ -22,7 +22,14 @@ import {
 } from "./vueTemplate.js";
 import { extractVueEmits, extractEmitLiveness } from "./vueEmits.js";
 import { analyzeVueTemplatePatterns } from "./templatePatterns.js";
-import { analyzeHook, analyzeServiceOrAdapter, extractStoreName } from "./layerAnalyzers.js";
+import {
+  adapterMethodCallOf,
+  addToSetMap,
+  analyzeHook,
+  analyzeServiceOrAdapter,
+  extractStoreName,
+  setMapToRecord,
+} from "./layerAnalyzers.js";
 import { checkPhiCompliance } from "./phiCompliance.js";
 import { extractAccessibility } from "./accessibility.js";
 import { detectDataFetchingPattern } from "./dataFetching.js";
@@ -175,6 +182,7 @@ export class ComponentAnalyzer {
     const testIds = new Set<string>();
     const formFields: FormFieldInfo[] = [];
     const storeCalls = new Set<string>();
+    const methodCalls = new Map<string, Set<string>>();
     let line: number | undefined;
     let exportType: "named" | "default" | "none" = "none";
     let description: string | undefined;
@@ -225,6 +233,11 @@ export class ComponentAnalyzer {
           // Store usage: useCartStore(), useUserStore() — Pinia + Zustand convention.
           if (/^use[A-Z]\w*Store$/.test(hookName)) storeCalls.add(hookName);
         }
+        // Components call services directly too (someService.method()) —
+        // record method-level calls so data-flow tracing can scope the
+        // service/adapter endpoint surface to what's actually invoked.
+        const methodCall = adapterMethodCallOf(node);
+        if (methodCall) addToSetMap(methodCalls, methodCall.callee, methodCall.method);
       }
 
       // Extract useState destructuring: const [x, setX] = useState(...)
@@ -316,6 +329,9 @@ export class ComponentAnalyzer {
 
     const storeCallList = Array.from(storeCalls).sort();
     if (storeCallList.length) analysis.storeCalls = storeCallList;
+
+    const methodCallRecord = setMapToRecord(methodCalls);
+    if (methodCallRecord) analysis.methodCalls = methodCallRecord;
 
     return analysis;
   }

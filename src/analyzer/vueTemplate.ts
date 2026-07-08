@@ -19,10 +19,30 @@ export function extractVueScript(content: string): string {
   return scriptMatch ? scriptMatch[1] : "";
 }
 
-/** Extract the <template> block's inner content, or undefined if there is none. */
+/**
+ * Extract the top-level <template> block's inner content, or undefined if
+ * there is none. Vue templates NEST <template> elements (named slots:
+ * `<template #footer>`), so a lazy match to the first closing tag truncated
+ * everything past the first slot — silently hiding later fire sites, child
+ * components, and bindings. Track nesting depth instead.
+ */
 export function extractTemplateBlock(content: string): string | undefined {
-  const match = content.match(/<template\b[^>]*>([\s\S]*?)<\/template>/);
-  return match ? match[1] : undefined;
+  const open = content.match(/<template\b[^>]*>/);
+  if (!open || open.index === undefined) return undefined;
+  const start = open.index + open[0].length;
+  if (open[0].endsWith("/>")) return undefined; // degenerate self-closing root
+
+  const tag = /<template\b[^>]*>|<\/template>/g;
+  tag.lastIndex = start;
+  let depth = 1;
+  let m: RegExpExecArray | null;
+  while ((m = tag.exec(content))) {
+    if (m[0].endsWith("/>")) continue; // self-closing: neither opens nor closes
+    depth += m[0] === "</template>" ? -1 : 1;
+    if (depth === 0) return content.slice(start, m.index);
+  }
+  // Unbalanced markup: better the whole remainder than a truncated block.
+  return content.slice(start);
 }
 
 /** PascalCase child components and event handlers bound in the template. */

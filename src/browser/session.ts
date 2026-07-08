@@ -41,14 +41,28 @@ export class BrowserSession {
   // — survives across calls. Diagnostics accumulate here and are sliced per-call.
   private primaryPage: Page | null = null;
   private primaryDiag: DiagBuffers | null = null;
-  private readonly outputDirAbs: string;
+  private outputDirAbs: string;
 
   constructor(
-    workspaceRoot: string,
-    private readonly config: BrowserConfig
+    private readonly workspaceRoot: string,
+    private config: BrowserConfig
   ) {
     this.outputDirAbs = path.resolve(
       workspaceRoot,
+      config.outputDir || ".atlas-ui/captures"
+    );
+  }
+
+  /**
+   * Swap in a freshly-loaded browser config — e.g. `.atlas-ui.json` gained a
+   * `browser.login` block after startup. Does not touch the live browser;
+   * resetLogin() (the only caller path) tears the context down right after, so
+   * the next page uses the new settings.
+   */
+  updateConfig(config: BrowserConfig): void {
+    this.config = config;
+    this.outputDirAbs = path.resolve(
+      this.workspaceRoot,
       config.outputDir || ".atlas-ui/captures"
     );
   }
