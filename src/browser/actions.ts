@@ -1,4 +1,4 @@
-import type { Page } from "playwright";
+import type { Locator, Page } from "playwright";
 import type { ApiCall, FlowAction, NetworkEntry } from "./types.js";
 
 /** Execute one interaction. Throws (with Playwright's message) if it can't. */
@@ -21,41 +21,72 @@ export async function runAction(page: Page, a: FlowAction): Promise<void> {
     }
   }
 
-  // Everything else acts on a Locator. `.first()` keeps the plain path on the
-  // page.click()-style first-match semantics existing flows were written
-  // against; `within` composes the innermost-container scope instead.
-  const target = a.within
+  // Everything else acts on a Locator. Responsive layouts often render the
+  // same control twice (desktop + hidden mobile variant), and a plain
+  // `.first()` pins the action to whichever match comes first in the DOM —
+  // hidden or not — hanging until timeout. filter({ visible: true }) is a
+  // live query, so the action targets the first VISIBLE match as soon as one
+  // exists; when the first DOM match is already visible this picks the same
+  // element `.first()` did. Every action below requires visibility anyway
+  // (waitFor's default state is 'visible'), so no working target is lost.
+  const base = a.within
     ? scopedTarget(page, need(a.selector, "selector"), a.within)
-    : page.locator(need(a.selector, "selector")).first();
+    : page.locator(need(a.selector, "selector"));
+  const target = base.filter({ visible: true }).first();
 
-  switch (a.type) {
-    case "click":
-      await target.click({ timeout });
-      return;
-    case "fill":
-      await target.fill(a.text ?? "", { timeout });
-      return;
-    case "select":
-      await target.selectOption(a.text ?? "", { timeout });
-      return;
-    case "check":
-      await target.check({ timeout });
-      return;
-    case "uncheck":
-      await target.uncheck({ timeout });
-      return;
-    case "hover":
-      await target.hover({ timeout });
-      return;
-    case "press":
-      await target.press(need(a.key, "key"), { timeout });
-      return;
-    case "waitFor":
-      await target.waitFor({ timeout });
-      return;
-    default:
-      throw new Error(`Unknown action type: ${(a as FlowAction).type}`);
+  try {
+    switch (a.type) {
+      case "click":
+        await target.click({ timeout });
+        return;
+      case "fill":
+        await target.fill(a.text ?? "", { timeout });
+        return;
+      case "select":
+        await target.selectOption(a.text ?? "", { timeout });
+        return;
+      case "check":
+        await target.check({ timeout });
+        return;
+      case "uncheck":
+        await target.uncheck({ timeout });
+        return;
+      case "hover":
+        await target.hover({ timeout });
+        return;
+      case "press":
+        await target.press(need(a.key, "key"), { timeout });
+        return;
+      case "waitFor":
+        await target.waitFor({ timeout });
+        return;
+      default:
+        throw new Error(`Unknown action type: ${(a as FlowAction).type}`);
+    }
+  } catch (err) {
+    throw await explainHiddenMatches(err, base, a);
   }
+}
+
+/**
+ * On timeout, say WHY when the answer is "everything that matched is hidden"
+ * — the raw Playwright log shows retries against a resolved-but-hidden node,
+ * which reads like a flaky click rather than a selector problem.
+ */
+async function explainHiddenMatches(err: unknown, base: Locator, a: FlowAction): Promise<unknown> {
+  if (!(err instanceof Error) || !err.message.includes("Timeout")) return err;
+  try {
+    const total = await base.count();
+    if (total > 0 && (await base.filter({ visible: true }).count()) === 0) {
+      return new Error(
+        `Action "${a.type}" on ${a.selector}: ${total} match(es) but none visible ` +
+          `(hidden duplicates / collapsed container?). ${err.message}`,
+      );
+    }
+  } catch {
+    // Page navigated away or closed mid-diagnosis — keep the original error.
+  }
+  return err;
 }
 
 /**
@@ -65,12 +96,12 @@ export async function runAction(page: Page, a: FlowAction): Promise<void> {
  * excluding elements that contain another such element leaves only the
  * innermost, so ancestors (body, list wrapper) never win and same-text
  * matches in OTHER rows are excluded because their row doesn't contain this
- * row's text.
+ * row's text. The caller applies the visible-match filter and `.first()`.
  */
 function scopedTarget(page: Page, selector: string, within: string) {
   const text = JSON.stringify(within);
   const container = `:has-text(${text}):has(${selector})`;
-  return page.locator(`${container}:not(:has(${container}))`).locator(selector).first();
+  return page.locator(`${container}:not(:has(${container}))`).locator(selector);
 }
 
 /** One-line, secret-safe description of an action for the report. */

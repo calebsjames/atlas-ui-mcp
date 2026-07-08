@@ -14,7 +14,9 @@ const ACTION_ITEM_SCHEMA = {
     },
     selector: {
       type: "string",
-      description: 'CSS or Playwright selector, e.g. "#email", "text=Submit", "role=button[name=\\"Save\\"]".',
+      description:
+        'CSS or Playwright selector, e.g. "#email", "text=Submit", "role=button[name=\\"Save\\"]". ' +
+        "Visible matches are preferred automatically — hidden duplicates (responsive variants) are skipped, so no `:visible` suffix is needed.",
     },
     within: {
       type: "string",
@@ -184,7 +186,7 @@ export const BROWSER_TOOLS = [
   {
     name: "reset_login",
     description:
-      "Recover the browser's authenticated session in-place: clears cookies/storage and any stuck login error, then (by default) re-runs the configured login flow immediately. Use this when authed runtime tools (render_component/check_page/capture_flow on protected routes) start failing with a login error — it's the in-session equivalent of restarting the server, without losing the browser. No-op with a note if no browser.login is configured. Public routes never need this; pass \"public\": true on those tools to skip login entirely.",
+      "Recover the browser's authenticated session in-place: re-reads .atlas-ui.json (so a browser.login block added or fixed after server startup takes effect — no restart needed), clears cookies/storage and any stuck login error, then (by default) re-runs the configured login flow immediately. Use this when authed runtime tools (render_component/check_page/capture_flow on protected routes) start failing with a login error, or right after adding/changing browser.login config. No-op with a note if no browser.login is configured even after the re-read. Public routes never need this; pass \"public\": true on those tools to skip login entirely.",
     inputSchema: {
       type: "object",
       properties: {
