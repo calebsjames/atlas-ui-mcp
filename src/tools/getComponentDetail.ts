@@ -2,7 +2,13 @@ import type { ComponentScanner } from "../scanner/componentScanner.js";
 import type { PropParser } from "../parser/propParser.js";
 import type { CacheManager } from "../cache/cacheManager.js";
 import type { AmbiguousMatch, Component, ComponentProps } from "../types.js";
-import { ensureCatalog, isAmbiguousMatch, resolveByName } from "./shared.js";
+import {
+  ensureCatalog,
+  isAmbiguousMatch,
+  nameNotFound,
+  resolveByName,
+  type NameNotFound,
+} from "./shared.js";
 
 export interface ComponentDetail extends Component {
   props?: ComponentProps;
@@ -12,19 +18,20 @@ export interface ComponentDetail extends Component {
  * Get detailed information about a specific component.
  * Uses indexed cache for O(1) lookup. When a name matches multiple files and
  * `file` fails to narrow to one, returns an AmbiguousMatch rather than silently
- * picking the first candidate.
+ * picking the first candidate; an unknown name returns a NameNotFound with
+ * close-match suggestions rather than a bare null.
  */
 export async function getComponentDetail(
   args: { name: string; file?: string },
   scanner: ComponentScanner,
   parser: PropParser,
   cache: CacheManager
-): Promise<ComponentDetail | AmbiguousMatch | null> {
+): Promise<ComponentDetail | AmbiguousMatch | NameNotFound> {
   const { name, file } = args;
   await ensureCatalog(scanner, cache);
 
   const resolved = resolveByName(cache.getByName(name), name, file);
-  if (resolved === null) return null;
+  if (resolved === null) return nameNotFound(name, cache);
   if (isAmbiguousMatch(resolved)) return resolved;
 
   const component = resolved;

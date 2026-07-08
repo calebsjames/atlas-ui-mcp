@@ -1,20 +1,28 @@
 {
-  "name": "atlas-ui-mcp-server",
-  "version": "0.1.0",
-  "description": "MCP server for atlas-ui",
+  "name": "atlas-ui-mcp",
+  "version": "3.0.0",
+  "description": "Codebase-aware MCP server for UI development: static component/data-flow/route analysis plus runtime browser verification (render, flows, network-vs-source diff) for Vue and React apps",
   "type": "module",
   "main": "dist/server.js",
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "start": "node dist/server.js"
+    "start": "node dist/server.js",
+    "test": "tsc && node --test dist/",
+    "prepublishOnly": "npm run build"
   },
   "keywords": [
     "mcp",
-    "server",
-    "atlas-ui"
+    "mcp-server",
+    "modelcontextprotocol",
+    "vue",
+    "react",
+    "component-analysis",
+    "playwright",
+    "data-flow",
+    "code-intelligence"
   ],
-  "author": "",
+  "author": "Caleb James",
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
@@ -23,5 +31,24 @@
   },
   "devDependencies": {
     "@types/node": "^20.11.0"
+  },
+  "bin": {
+    "atlas-ui-mcp": "dist/server.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/calebsjames/atlas-ui-mcp.git"
+  },
+  "homepage": "https://github.com/calebsjames/atlas-ui-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/calebsjames/atlas-ui-mcp/issues"
   }
 }

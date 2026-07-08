@@ -6,6 +6,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import path from "path";
+import { readFileSync } from "fs";
 import { fileURLToPath } from "url";
 import { loadConfig } from "./config/configLoader.js";
 import { loadWorkspaceDotEnv } from "./config/dotenv.js";
@@ -44,9 +45,15 @@ const ctx: ToolContext = {
 
 const TOOLS = [...CATALOG_TOOLS, ...BROWSER_TOOLS];
 
+// package.json is the single source of truth for the version — it sits one
+// level above this module in both the src/ (dev) and dist/ (built) layouts.
+const { version: VERSION } = JSON.parse(
+  readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+) as { version: string };
+
 // Create MCP server
 const server = new Server(
-  { name: "atlas-ui", version: "2.2.0" },
+  { name: "atlas-ui", version: VERSION },
   { capabilities: { tools: {} } }
 );
 

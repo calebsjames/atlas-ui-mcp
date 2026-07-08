@@ -1,7 +1,14 @@
 import type { ComponentScanner } from "../scanner/componentScanner.js";
 import type { CacheManager } from "../cache/cacheManager.js";
 import type { AmbiguousMatch } from "../types.js";
-import { ensureCatalog, collectUnique, isAmbiguousMatch, resolveByName } from "./shared.js";
+import {
+  ensureCatalog,
+  collectUnique,
+  isAmbiguousMatch,
+  nameNotFound,
+  resolveByName,
+  type NameNotFound,
+} from "./shared.js";
 
 export interface HookDetail {
   name: string;
@@ -33,7 +40,7 @@ export async function getHookDetail(
   args: { name: string; file?: string },
   scanner: ComponentScanner,
   cache: CacheManager
-): Promise<HookDetail | AmbiguousMatch | null> {
+): Promise<HookDetail | AmbiguousMatch | NameNotFound> {
   const catalog = await ensureCatalog(scanner, cache);
 
   const hookCandidates = cache
@@ -41,7 +48,9 @@ export async function getHookDetail(
     .filter((c) => c.architectureLayer === "hook" || c.name.startsWith("use"));
 
   const resolved = resolveByName(hookCandidates, args.name, args.file);
-  if (resolved === null) return null;
+  // Suggestions search the whole catalog, so a name that exists only in a
+  // non-hook layer still comes back as a pointer instead of a dead end.
+  if (resolved === null) return nameNotFound(args.name, cache);
   if (isAmbiguousMatch(resolved)) return resolved;
 
   const hook = resolved;

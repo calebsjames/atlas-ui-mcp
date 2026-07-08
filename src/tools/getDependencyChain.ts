@@ -1,7 +1,14 @@
 import type { ComponentScanner } from "../scanner/componentScanner.js";
 import type { CacheManager } from "../cache/cacheManager.js";
 import type { AmbiguousMatch, ArchitectureLayer, Component } from "../types.js";
-import { ensureCatalog, collectUnique, isAmbiguousMatch, resolveByName } from "./shared.js";
+import {
+  ensureCatalog,
+  collectUnique,
+  isAmbiguousMatch,
+  nameNotFound,
+  resolveByName,
+  type NameNotFound,
+} from "./shared.js";
 
 export interface DependencyNode {
   name: string;
@@ -27,11 +34,11 @@ export async function getDependencyChain(
   args: { name: string; depth?: number; file?: string },
   scanner: ComponentScanner,
   cache: CacheManager
-): Promise<DependencyChain | AmbiguousMatch | null> {
+): Promise<DependencyChain | AmbiguousMatch | NameNotFound> {
   await ensureCatalog(scanner, cache);
 
   const resolved = resolveByName(cache.getByName(args.name), args.name, args.file);
-  if (resolved === null) return null;
+  if (resolved === null) return nameNotFound(args.name, cache);
   if (isAmbiguousMatch(resolved)) return resolved;
 
   const target = resolved;

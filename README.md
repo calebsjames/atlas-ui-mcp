@@ -42,6 +42,16 @@ Catalog-wide listings and search results return compact summaries to keep token 
 
 ## Setup
 
+**From npm** (no clone needed):
+
+```bash
+npx atlas-ui-mcp /path/to/your/app
+```
+
+or in an MCP config, `"command": "npx", "args": ["-y", "atlas-ui-mcp", "/path/to/your/app"]`.
+
+**From source:**
+
 ```bash
 npm install
 npm run build
@@ -192,6 +202,8 @@ Tip: `get_component_detail` exposes each component's `testIds` and `formFields` 
 
 Each step's `actions` run in order. Supported action `type`s: `click`, `fill`, `select`, `check`, `uncheck`, `hover`, `press`, `waitFor`. Selectors accept CSS or Playwright engines (`#email`, `text=Submit`, `role=button[name="Save"]`). `fill`/`select` use `text`; `press` uses `key`.
 
+**Visible matches are preferred automatically.** Responsive layouts often render the same control twice (a desktop and a hidden mobile variant); actions and `waitFor` target the first *visible* match of the selector, so hidden duplicates never pin a click or wait until timeout, and no `:visible` suffix is needed. If every match stays hidden, the timeout error says so (`N match(es) but none visible`) instead of surfacing a generic retry log. This applies to all action runners: `capture_flow` steps, `verify_data_flow` actions, and the `browser.login` pre-step.
+
 ```jsonc
 {
   "steps": [
@@ -270,3 +282,7 @@ If your app is behind a login, add a `login` block. The session authenticates **
 The env vars must be visible to the MCP server process (set them in the `env` block of your `mcp.json` server entry). On login failure the session tears down and the next call retries, rather than silently running unauthenticated. Filled values are reported by length, so credentials never appear in tool output.
 
 > **SPA note:** all browser tools share one page so in-app/session-storage auth survives navigation. If your app stores its token in `sessionStorage` (common), a per-page approach would lose it — sharing the page is what makes the login pre-step stick.
+
+## License
+
+[MIT](LICENSE) — free for any use, modification, and redistribution. Contributions welcome.

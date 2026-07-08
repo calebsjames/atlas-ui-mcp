@@ -4,7 +4,13 @@ import type { ComponentScanner } from "../scanner/componentScanner.js";
 import type { PropParser } from "../parser/propParser.js";
 import type { CacheManager } from "../cache/cacheManager.js";
 import type { AmbiguousMatch, ComponentProps } from "../types.js";
-import { ensureCatalog, isAmbiguousMatch, resolveByName } from "./shared.js";
+import {
+  ensureCatalog,
+  isAmbiguousMatch,
+  nameNotFound,
+  resolveByName,
+  type NameNotFound,
+} from "./shared.js";
 
 /**
  * Parse the props of a component identified either by `componentPath` (a path
@@ -22,7 +28,7 @@ export async function getComponentProps(
   parser: PropParser,
   cache: CacheManager,
   scanner: ComponentScanner
-): Promise<ComponentProps | AmbiguousMatch | { error: string }> {
+): Promise<ComponentProps | AmbiguousMatch | NameNotFound | { error: string }> {
   if (args.componentPath) {
     const fullPath = path.isAbsolute(args.componentPath)
       ? args.componentPath
@@ -39,9 +45,7 @@ export async function getComponentProps(
   if (args.name) {
     await ensureCatalog(scanner, cache);
     const resolved = resolveByName(cache.getByName(args.name), args.name, args.file);
-    if (resolved === null) {
-      return { error: `no catalog item named "${args.name}"` };
-    }
+    if (resolved === null) return nameNotFound(args.name, cache);
     if (isAmbiguousMatch(resolved)) return resolved;
     return parseProps(resolved.path, resolved.relativePath, "", parser, cache);
   }

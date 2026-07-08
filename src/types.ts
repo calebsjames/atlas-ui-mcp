@@ -186,7 +186,7 @@ export interface Component {
   emitsFired?: string[]; // declared emits with a real emit()/$emit() call site (proven live)
   emitsDead?: string[]; // declared but never fired anywhere — dead plumbing
   emitsUndeclared?: string[]; // fired in code/template but not declared (Vue 3 would warn)
-  emitsDynamic?: boolean; // an emit(variable) with a non-literal name exists — liveness unprovable
+  emitsDynamic?: boolean; // emit(variable) or emit fn passed to another module — liveness unprovable
   vModelBindings?: string[]; // v-model bindings (e.g., ["modelValue", "search", "filters"])
   // Events this component binds on each child it renders (@event / v-on:event),
   // per child — feeds dangling-listener detection (parent listens for an event
@@ -199,10 +199,20 @@ export interface Component {
   returnType?: string; // Return type for hooks
   queryKeys?: string[]; // React Query keys used
   adapterCalls?: string[]; // Adapter/service functions called
+  // Methods invoked per adapter/service-ish callee, e.g. { userAdapter: ["getUser"] }.
+  // Lets data-flow tracing scope an adapter's endpoints to what's actually called.
+  methodCalls?: Record<string, string[]>;
   phiCompliance?: PhiComplianceInfo; // PHI compliance status
 
   // Service/adapter-specific metadata
-  apiEndpoints?: string[]; // API endpoints called
+  apiEndpoints?: string[]; // API endpoints called (file-wide union)
+  // apiEndpoints attributed to the enclosing exported function/method, e.g.
+  // { getSessions: ["GET /fitting-sessions"] }. Pairs with callers' methodCalls.
+  endpointsByMethod?: Record<string, string[]>;
+  // Per exported method, the callee.method pairs it delegates to, e.g.
+  // { getSessions: { fittingAdapter: ["listSessions"] } } — keeps a trace that
+  // enters via one service method from inheriting the whole file's adapter calls.
+  delegatesByMethod?: Record<string, Record<string, string[]>>;
   hasMockImplementation?: boolean; // Uses mock/real adapter pattern
   dtosUsed?: string[]; // DTOs referenced
 
@@ -373,8 +383,11 @@ export interface ComponentAnalysis {
   returnType?: string;
   queryKeys?: string[];
   adapterCalls?: string[];
+  methodCalls?: Record<string, string[]>;
   phiCompliance?: PhiComplianceInfo;
   apiEndpoints?: string[];
+  endpointsByMethod?: Record<string, string[]>;
+  delegatesByMethod?: Record<string, Record<string, string[]>>;
   hasMockImplementation?: boolean;
   dtosUsed?: string[];
 }

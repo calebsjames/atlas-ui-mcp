@@ -42,14 +42,15 @@ export async function verifyDataFlow(
     cache
   );
 
-  // A colliding name yields an AmbiguousMatch instead of a flow — surface the
-  // candidates as text (no navigation) so the agent can re-call with `file`.
-  if (flow && "ambiguous" in flow) {
+  // A colliding name yields an AmbiguousMatch and an unknown one a
+  // NameNotFound instead of a flow — surface either as text (no navigation)
+  // so the agent can re-call with `file` or a suggested name.
+  if ("ambiguous" in flow || "found" in flow) {
     return { content: [{ type: "text", text: JSON.stringify(flow, null, 2) }] };
   }
 
   // allEndpoints unions across the target AND its child components.
-  const predicted = flow ? flow.allEndpoints : [];
+  const predicted = flow.allEndpoints;
 
   const resolved = await resolveRoute(
     {

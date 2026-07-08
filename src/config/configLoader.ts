@@ -19,7 +19,9 @@ const REACT_SCAN_TARGETS: ScanTarget[] = [
 ];
 
 const VUE_SCAN_TARGETS: ScanTarget[] = [
-  { dir: "src/components", extensions: [".vue"], type: "component" },
+  // Vue SFCs plus colocated .ts/.tsx (composables/helpers next to components,
+  // classified by name — e.g. use*.ts under src/components resolves as a hook).
+  { dir: "src/components", extensions: [".vue", ".ts", ".tsx"], type: "component" },
   { dir: "src/views", extensions: [".vue"], type: "page" },
   { dir: "src/pages", extensions: [".vue"], type: "page" },
   { dir: "src/composables", extensions: [".ts"], type: "hook" },
@@ -27,6 +29,12 @@ const VUE_SCAN_TARGETS: ScanTarget[] = [
   { dir: "src/adapters", extensions: [".ts"], type: "adapter" },
   { dir: "src/stores", extensions: [".ts"], type: "store" },
   { dir: "src/store", extensions: [".ts"], type: "store" },
+  // Non-visual layers — kept as graph nodes so impact analysis can trace
+  // through them. Missing dirs are simply skipped, so these are safe defaults.
+  { dir: "src/dto", extensions: [".ts"], type: "dto" },
+  { dir: "src/types", extensions: [".ts"], type: "type" },
+  { dir: "src/utils", extensions: [".ts"], type: "util" },
+  { dir: "src/auth", extensions: [".ts"], type: "util" },
 ];
 
 const REACT_ROUTE_FILES = ["src/App.tsx"];

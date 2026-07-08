@@ -142,6 +142,96 @@ export function isAmbiguousMatch(value: unknown): value is AmbiguousMatch {
 }
 
 /**
+ * Returned when a name matches NOTHING in the catalog. A bare null told the
+ * agent neither that the lookup failed nor what to try instead — inconsistent
+ * with the AmbiguousMatch UX for colliding names.
+ */
+export interface NameNotFound {
+  found: false;
+  message: string;
+  suggestions: {
+    name: string;
+    relativePath: string;
+    architectureLayer: ArchitectureLayer;
+  }[];
+}
+
+/** Type guard for the not-found sentinel returned by name resolution. */
+export function isNameNotFound(value: unknown): value is NameNotFound {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as NameNotFound).found === false
+  );
+}
+
+/**
+ * Build the "no such name — did you mean?" result. Suggestions are catalog
+ * items whose names contain the query (or vice versa) or sit within a small
+ * edit distance, so a typo'd or partially-remembered name still lands.
+ */
+export function nameNotFound(name: string, cache: CacheManager): NameNotFound {
+  const components = cache.getCatalog()?.components ?? [];
+  const query = name.toLowerCase();
+
+  const scored: { c: Component; score: number }[] = [];
+  const seen = new Set<string>();
+  for (const c of components) {
+    if (seen.has(c.relativePath)) continue;
+    const candidate = c.name.toLowerCase();
+    let score: number;
+    if (candidate.includes(query) || query.includes(candidate)) {
+      // Substring either way — strongest signal; closer lengths rank higher.
+      score = Math.abs(candidate.length - query.length);
+    } else {
+      const distance = editDistance(query, candidate, 3);
+      if (distance > Math.min(3, Math.floor(query.length / 3))) continue;
+      score = 10 + distance; // typo-range matches rank below substring matches
+    }
+    seen.add(c.relativePath);
+    scored.push({ c, score });
+  }
+  scored.sort((a, b) => a.score - b.score || a.c.name.localeCompare(b.c.name));
+
+  const suggestions = scored.slice(0, 5).map(({ c }) => ({
+    name: c.name,
+    relativePath: c.relativePath,
+    architectureLayer: c.architectureLayer,
+  }));
+
+  return {
+    found: false,
+    message:
+      `No catalog item is named "${name}".` +
+      (suggestions.length
+        ? " Closest matches are listed in suggestions — retry with one of those names."
+        : " Nothing similar found; use search_components or list_all_components to browse the catalog."),
+    suggestions,
+  };
+}
+
+/** Levenshtein distance, capped at `max` (returns max+1 once it's exceeded). */
+function editDistance(a: string, b: string, max: number): number {
+  if (Math.abs(a.length - b.length) > max) return max + 1;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const curr = [i];
+    let rowMin = i;
+    for (let j = 1; j <= b.length; j++) {
+      curr[j] = Math.min(
+        prev[j] + 1,
+        curr[j - 1] + 1,
+        prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)
+      );
+      rowMin = Math.min(rowMin, curr[j]);
+    }
+    if (rowMin > max) return max + 1;
+    prev = curr;
+  }
+  return prev[b.length];
+}
+
+/**
  * Resolve a name to a single Component, disambiguating by `file` when the name
  * collides. `matches` is whatever the caller looked up (optionally pre-narrowed,
  * e.g. to hook-layer items). Returns the sole match, `null` when nothing

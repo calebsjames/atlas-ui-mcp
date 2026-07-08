@@ -188,7 +188,7 @@ const HANDLERS: Record<string, ToolHandler> = {
     ),
 
   reset_login: (args, ctx) =>
-    resetLogin({ relogin: args?.relogin as boolean | undefined }, ctx.browser),
+    resetLogin({ relogin: args?.relogin as boolean | undefined }, ctx),
 
   inspect_rendered_page: (args, ctx) =>
     inspectRenderedPage(

@@ -9,6 +9,12 @@ import type { BrowserConfig, Component } from "../types.js";
 import { ensureCatalog } from "./shared.js";
 import { getRouteMap } from "./getRouteMap.js";
 import { errMessage, toAbsoluteUrl } from "../util.js";
+import {
+  assessSeedRisk,
+  maxRiskLevel,
+  type RiskLevel,
+  type SeedRisk,
+} from "./riskAssessment.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -30,6 +36,8 @@ export interface ChangedFileEntry {
   name?: string;
   layer?: string;
   note?: string;
+  /** Risk classification for this change; absent when the file isn't in the catalog. */
+  risk?: SeedRisk;
 }
 
 export interface AffectedItem {
@@ -67,6 +75,9 @@ export interface WhatsAffectedResult {
   /** Set when the app root (src/App.*, src/main.*) is in the affected set —
    *  impact can surface on ANY route, not just affectedRoutes. */
   rootAffected?: boolean;
+  /** Most severe per-file risk, with the files that drive it. Absent when no
+   *  changed file resolved to a catalog item. */
+  overallRisk?: { level: RiskLevel; score: number; drivers: string[] };
 }
 
 export interface WhatsAffectedError {
@@ -154,9 +165,12 @@ export async function whatsAffected(
 
   const changedFiles: ChangedFileEntry[] = [];
   const seeds: Component[] = [];
+  // changedFiles index per seed, so per-seed risk lands on the right entry.
+  const seedEntryIndexes: number[] = [];
   for (const rel of normalized) {
     const item = byRelPath.get(rel);
     if (item) {
+      seedEntryIndexes.push(changedFiles.length);
       changedFiles.push({ file: rel, inCatalog: true, name: item.name, layer: item.architectureLayer });
       seeds.push(item);
     } else {
@@ -164,7 +178,12 @@ export async function whatsAffected(
     }
   }
 
-  const visited = bfsUpstream(seeds, cache, hookUsers, maxDistance);
+  // One walk PER seed so risk counts (blast radius, routes) are true for each
+  // changed file — a shared node counts toward every seed that reaches it. The
+  // merged map preserves the original shortest-distance, first-seed attribution
+  // for affectedItems.
+  const perSeedVisited = seeds.map((seed) => bfsUpstream([seed], cache, hookUsers, maxDistance));
+  const visited = mergeVisited(perSeedVisited);
 
   const affectedAll = [...visited.values()].sort(
     (a, b) => a.distance - b.distance || a.item.name.localeCompare(b.item.name)
@@ -190,13 +209,50 @@ export async function whatsAffected(
     );
   }
 
-  const affectedRoutes = await resolveAffectedRoutes(
-    visited,
+  const routeMatches = await resolveAffectedRoutes(
+    perSeedVisited,
     routeAnalyzer,
     scanner,
     cache,
     browserConfig.devServerUrl || DEFAULT_DEV_SERVER
   );
+
+  const seedRisks = seeds.map((seed, i) => {
+    const walk = perSeedVisited[i];
+    let directDependents = 0;
+    let reachesRoot = false;
+    for (const node of walk.values()) {
+      if (node.distance === 1) directDependents++;
+      if (node.item.architectureLayer === "root") reachesRoot = true;
+    }
+    const seedRoutes = routeMatches.filter((m) => m.seedIndexes.includes(i));
+    return assessSeedRisk({
+      layer: seed.architectureLayer,
+      blastRadius: walk.size - 1,
+      directDependents,
+      routesAffected: seedRoutes.length,
+      reachesRoot,
+      affectsPublicRoute: seedRoutes.some(
+        (m) => m.route.isProtected === false && m.route.protection !== "unknown"
+      ),
+    });
+  });
+  seedRisks.forEach((risk, i) => {
+    changedFiles[seedEntryIndexes[i]].risk = risk;
+  });
+
+  if (maxDistance < MAX_DEPTH && seeds.length > 0) {
+    notes.push(
+      `Upstream walk capped at maxDistance=${maxDistance} — blastRadius and risk may under-count.`
+    );
+  }
+
+  // Riskiest change first: routes reached by a higher-scoring seed are the
+  // ones most worth checking, and suggestedChecks inherit this ordering.
+  const scoreOf = (m: RouteMatch) => Math.max(...m.seedIndexes.map((i) => seedRisks[i].score));
+  const affectedRoutes = [...routeMatches]
+    .sort((a, b) => scoreOf(b) - scoreOf(a))
+    .map((m) => m.route);
 
   if (affectedRoutes.some((r) => r.protection === "unknown")) {
     notes.push(
@@ -234,6 +290,23 @@ export async function whatsAffected(
     );
   }
 
+  let overallRisk: WhatsAffectedResult["overallRisk"];
+  if (seedRisks.length > 0) {
+    const drivers = seeds
+      .map((seed, i) => ({ seed, risk: seedRisks[i] }))
+      .filter((x) => x.risk.level !== "low")
+      .sort((a, b) => b.risk.score - a.risk.score)
+      .slice(0, 3)
+      .map((x) => `${x.seed.relativePath} (${x.risk.level}): ${x.risk.factors[0]}`);
+    overallRisk = {
+      level: maxRiskLevel(seedRisks.map((r) => r.level)),
+      score: Math.max(...seedRisks.map((r) => r.score)),
+      drivers: drivers.length
+        ? drivers
+        : ["all changed files are low-risk (little upstream reach)"],
+    };
+  }
+
   return {
     changedFiles,
     affectedItems,
@@ -242,6 +315,7 @@ export async function whatsAffected(
     notes,
     ...(truncated ? { truncated, totalAffected } : {}),
     ...(rootHit ? { rootAffected: true } : {}),
+    ...(overallRisk ? { overallRisk } : {}),
   };
 }
 
@@ -329,54 +403,90 @@ function upstreamUsers(
 }
 
 /**
+ * Merge per-seed walks into one map, keeping each node at its shortest
+ * distance (earlier seed wins ties) — equivalent to the multi-source BFS the
+ * merged output used to come from.
+ */
+function mergeVisited(walks: Map<string, VisitedNode>[]): Map<string, VisitedNode> {
+  const merged = new Map<string, VisitedNode>();
+  for (const walk of walks) {
+    for (const [key, node] of walk) {
+      const existing = merged.get(key);
+      if (!existing || node.distance < existing.distance) merged.set(key, node);
+    }
+  }
+  return merged;
+}
+
+interface RouteMatch {
+  route: AffectedRoute;
+  /** Indexes into the seeds array whose upstream walk reaches this route. */
+  seedIndexes: number[];
+}
+
+/**
  * Map the affected components onto routes: a route is affected when its
  * component name (or fileAlias) matches an affected item, or when the route's
- * resolved page file is itself in the affected set. Each route is turned into a
- * concrete dev-server URL with `:params` left in place.
+ * resolved page file is itself in the affected set. Matching runs per seed so
+ * risk scoring knows which changed file surfaces on which route. Each route is
+ * turned into a concrete dev-server URL with `:params` left in place.
  */
 async function resolveAffectedRoutes(
-  visited: Map<string, VisitedNode>,
+  perSeedVisited: Map<string, VisitedNode>[],
   routeAnalyzer: RouteAnalyzer,
   scanner: ComponentScanner,
   cache: CacheManager,
   devServerUrl: string
-): Promise<AffectedRoute[]> {
-  const affectedNames = new Set<string>();
-  const affectedRelPaths = new Set<string>();
-  for (const { item } of visited.values()) {
-    affectedNames.add(item.name.toLowerCase());
-    if (item.fileAlias) affectedNames.add(item.fileAlias.toLowerCase());
-    affectedRelPaths.add(toForwardSlashes(item.relativePath));
-  }
+): Promise<RouteMatch[]> {
+  const seedSets = perSeedVisited.map((walk) => {
+    const names = new Set<string>();
+    const relPaths = new Set<string>();
+    for (const { item } of walk.values()) {
+      names.add(item.name.toLowerCase());
+      if (item.fileAlias) names.add(item.fileAlias.toLowerCase());
+      relPaths.add(toForwardSlashes(item.relativePath));
+    }
+    return { names, relPaths };
+  });
 
   const routeMap = await getRouteMap(routeAnalyzer, scanner, cache);
-  const routes: AffectedRoute[] = [];
+  const matches: RouteMatch[] = [];
   const seen = new Set<string>();
 
   for (const route of routeMap) {
-    const nameMatch = affectedNames.has(route.component.toLowerCase());
+    const componentLower = route.component.toLowerCase();
     const relPath = route.componentDetails
       ? toForwardSlashes(route.componentDetails.relativePath)
       : undefined;
-    const pathMatch = relPath ? affectedRelPaths.has(relPath) : false;
-    if (!nameMatch && !pathMatch) continue;
+
+    const seedIndexes: number[] = [];
+    for (let i = 0; i < seedSets.length; i++) {
+      const { names, relPaths } = seedSets[i];
+      if (names.has(componentLower) || (relPath !== undefined && relPaths.has(relPath))) {
+        seedIndexes.push(i);
+      }
+    }
+    if (seedIndexes.length === 0) continue;
 
     const key = `${route.path}:${route.component}`;
     if (seen.has(key)) continue;
     seen.add(key);
 
-    routes.push({
-      path: route.path,
-      component: route.component,
-      // Dev-server URL with `:params` preserved for the agent to fill.
-      url: toAbsoluteUrl(devServerUrl, route.path),
-      isProtected: route.isProtected,
-      ...(route.protection ? { protection: route.protection } : {}),
-      ...(route.dynamicSegments?.length ? { dynamicSegments: route.dynamicSegments } : {}),
+    matches.push({
+      route: {
+        path: route.path,
+        component: route.component,
+        // Dev-server URL with `:params` preserved for the agent to fill.
+        url: toAbsoluteUrl(devServerUrl, route.path),
+        isProtected: route.isProtected,
+        ...(route.protection ? { protection: route.protection } : {}),
+        ...(route.dynamicSegments?.length ? { dynamicSegments: route.dynamicSegments } : {}),
+      },
+      seedIndexes,
     });
   }
 
-  return routes;
+  return matches;
 }
 
 /** Ready-to-paste verification hints, one per affected route, deduped and capped. */

@@ -5,8 +5,10 @@ import {
   ensureCatalog,
   findByLayers,
   isAmbiguousMatch,
+  nameNotFound,
   resolveByName,
   RENDERABLE_LAYERS,
+  type NameNotFound,
 } from "./shared.js";
 
 export interface DataFlowStep {
@@ -67,14 +69,15 @@ export async function getDataFlow(
   args: { name: string; depth?: number; file?: string },
   scanner: ComponentScanner,
   cache: CacheManager
-): Promise<DataFlowResult | AmbiguousMatch | null> {
+): Promise<DataFlowResult | AmbiguousMatch | NameNotFound> {
   const catalog = await ensureCatalog(scanner, cache);
 
   // Colliding names are a real footgun here: tracing the wrong "Header" gives a
   // confident but wrong endpoint prediction. Narrow by `file` when we can; if
   // that leaves the choice open, say so instead of guessing.
   const target = resolveByName(cache.getByName(args.name), args.name, args.file);
-  if (target === null || isAmbiguousMatch(target)) return target;
+  if (target === null) return nameNotFound(args.name, cache);
+  if (isAmbiguousMatch(target)) return target;
 
   const maxDepth = Math.max(0, args.depth ?? DEFAULT_DEPTH);
   const chains: DataFlowChain[] = [];
@@ -297,19 +300,112 @@ function traceFromServiceCalls(
     const service = cache.getByName(serviceName)[0];
     if (!service || service.architectureLayer !== "service") continue;
 
-    services.push(toStep(service));
+    pushUniqueStep(services, toStep(service));
+
+    // Which service methods does the SOURCE actually call? Known for hooks and
+    // stores (the analyzer records method-level calls there); components fall
+    // back to the service's whole surface.
+    const calledServiceMethods =
+      source.methodCalls?.[serviceName] ?? source.methodCalls?.[service.name];
+
+    // A service can fetch directly (no adapter hop) — count its own endpoints
+    // for the called methods, where attribution exists.
+    if (calledServiceMethods?.length && service.endpointsByMethod) {
+      for (const method of calledServiceMethods) {
+        endpoints.push(...(service.endpointsByMethod[method] || []));
+      }
+    }
+
+    const adapterMethods = delegatedAdapterMethods(service, calledServiceMethods);
 
     for (const adapterName of collectCallNames(service, ["adapter"])) {
       const adapter = cache.getByName(adapterName)[0];
       if (!adapter || adapter.architectureLayer !== "adapter") continue;
 
-      adapters.push(toStep(adapter, undefined, adapter.apiEndpoints));
-      endpoints.push(...(adapter.apiEndpoints || []));
+      const scoped = scopeAdapterEndpoints(adapterMethods, adapterName, adapter);
+      pushUniqueStep(adapters, toStep(adapter, scoped.methods, scoped.endpoints));
+      endpoints.push(...scoped.endpoints);
     }
   }
 
   if (services.length === 0 && adapters.length === 0) return null;
   return { services, adapters, endpoints: [...new Set(endpoints)] };
+}
+
+/**
+ * Methods the service calls per adapter, restricted to the service methods the
+ * source actually invokes when that attribution exists (delegatesByMethod);
+ * otherwise the service's file-wide method calls. `undefined` means "unknown —
+ * use the adapter's full surface".
+ */
+function delegatedAdapterMethods(
+  service: Component,
+  calledServiceMethods: string[] | undefined
+): Record<string, string[]> | undefined {
+  const delegates = service.delegatesByMethod;
+  if (calledServiceMethods?.length && delegates) {
+    const known = calledServiceMethods.filter((m) => delegates[m]);
+    if (known.length) {
+      const merged: Record<string, Set<string>> = {};
+      for (const serviceMethod of known) {
+        for (const [callee, methods] of Object.entries(delegates[serviceMethod])) {
+          merged[callee] ??= new Set();
+          for (const m of methods) merged[callee].add(m);
+        }
+      }
+      return Object.fromEntries(
+        Object.entries(merged).map(([callee, methods]) => [callee, [...methods]])
+      );
+    }
+  }
+  return service.methodCalls;
+}
+
+/**
+ * Endpoints the traced path can actually reach through the adapter. When we
+ * know which adapter methods fire (calledByAdapter) and which endpoints each
+ * method owns (endpointsByMethod), return just that subset — attributing an
+ * adapter's full surface (POST/DELETE included) to a read-only caller was
+ * pure over-approximation. Falls back to the full surface when attribution is
+ * incomplete on either side, so the result stays safe for verify_data_flow's
+ * unexpected-calls diff.
+ */
+function scopeAdapterEndpoints(
+  calledByAdapter: Record<string, string[]> | undefined,
+  calledName: string,
+  adapter: Component
+): { endpoints: string[]; methods?: string[] } {
+  const called = calledByAdapter?.[calledName] ?? calledByAdapter?.[adapter.name];
+  const byMethod = adapter.endpointsByMethod;
+  if (called?.length && byMethod) {
+    const known = called.filter((m) => byMethod[m]?.length);
+    if (known.length) {
+      return {
+        methods: known,
+        endpoints: [...new Set(known.flatMap((m) => byMethod[m]))],
+      };
+    }
+  }
+  return { endpoints: [...(adapter.apiEndpoints || [])] };
+}
+
+/**
+ * Append a step unless the same file is already listed; on a repeat, merge its
+ * methods/endpoints instead. Two services calling the same adapter used to
+ * list that adapter (and its endpoints) once per service.
+ */
+function pushUniqueStep(list: DataFlowStep[], step: DataFlowStep): void {
+  const existing = list.find((s) => s.relativePath === step.relativePath);
+  if (!existing) {
+    list.push(step);
+    return;
+  }
+  if (step.methods?.length) {
+    existing.methods = [...new Set([...(existing.methods || []), ...step.methods])];
+  }
+  if (step.endpoints?.length) {
+    existing.endpoints = [...new Set([...(existing.endpoints || []), ...step.endpoints])];
+  }
 }
 
 function toStep(item: Component, methods?: string[], apiEndpoints?: string[]): DataFlowStep {
