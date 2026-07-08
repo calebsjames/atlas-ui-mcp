@@ -173,7 +173,7 @@ Finds exported items that are never imported anywhere. Optionally filter by laye
 ### `get_data_flow`
 Traces the full data path: component → composable/hook/store → service → adapter → API endpoint — **including endpoints fetched by child components** (a page rarely fetches everything itself). Store-mediated flows (Pinia/Zustand) surface in a `stores` step per chain. Walks the child render tree (bounded by `depth`, default 3, plus a cycle-guard). Each chain is tagged with the `via` render path that reached it, and `allEndpoints` gives the union of everything the rendered route hits. Saves you from manually chaining `get_component_detail` + `get_hook_detail` calls.
 
-> **Name collisions:** `get_component_detail`, `get_component_props`, `get_hook_detail`, `get_dependency_chain`, and `get_data_flow` return `{ ambiguous: true, candidates: [...] }` when a name matches multiple files, instead of silently picking one. Re-call with `file` (a path substring) to disambiguate.
+> **Name collisions:** `get_component_detail`, `get_component_props`, `get_hook_detail`, `get_dependency_chain`, and `get_data_flow` return `{ ambiguous: true, candidates: [...] }` when a name matches multiple files. Instead of silently picking one, automatically re-calls with `file` (a path substring) to disambiguate.
 
 ## Runtime browser tools — let agents check their work
 
