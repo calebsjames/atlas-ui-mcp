@@ -45,6 +45,29 @@ export function extractTemplateBlock(content: string): string | undefined {
   return content.slice(start);
 }
 
+/**
+ * The expressions bound to `<component :is="...">`, in source order. Such a
+ * mount leaves no literal `<Tag>` for the template scan, so callers must resolve
+ * the target from script. Returns the raw expression — `activeTabComponent`,
+ * `item.icon`, `icons[icon]` — and leaves interpretation to the caller.
+ */
+export function extractDynamicComponentBindings(fullContent: string): string[] {
+  const template = extractTemplateBlock(fullContent);
+  if (!template) return [];
+
+  const bindings: string[] = [];
+  const tag = /<component\b([^>]*)>/g;
+  let m: RegExpExecArray | null;
+  while ((m = tag.exec(template))) {
+    const attrs = m[1];
+    const bound =
+      attrs.match(/(?::is|v-bind:is)\s*=\s*"([^"]*)"/) ??
+      attrs.match(/(?::is|v-bind:is)\s*=\s*'([^']*)'/);
+    if (bound) bindings.push(bound[1].trim());
+  }
+  return bindings;
+}
+
 /** PascalCase child components and event handlers bound in the template. */
 export function analyzeVueTemplate(fullContent: string): {
   childComponents: string[];

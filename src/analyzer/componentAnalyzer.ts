@@ -19,6 +19,7 @@ import {
   analyzeVueTemplate,
   extractChildEventBindings,
   extractVueTemplateSelectors,
+  extractDynamicComponentBindings,
 } from "./vueTemplate.js";
 import { extractVueEmits, extractEmitLiveness } from "./vueEmits.js";
 import { analyzeVueTemplatePatterns } from "./templatePatterns.js";
@@ -96,7 +97,18 @@ export class ComponentAnalyzer {
     rawContent: string
   ): void {
     const templateAnalysis = analyzeVueTemplate(rawContent);
-    base.childComponents = [...new Set([...(base.childComponents || []), ...templateAnalysis.childComponents])].sort();
+    const dynamicChildren = this.extractDynamicMountedChildren(
+      sourceFile,
+      rawContent,
+      base.imports ?? []
+    );
+    base.childComponents = [
+      ...new Set([
+        ...(base.childComponents || []),
+        ...templateAnalysis.childComponents,
+        ...dynamicChildren,
+      ]),
+    ].sort();
     base.eventHandlers = [...new Set([...(base.eventHandlers || []), ...templateAnalysis.eventHandlers])].sort();
 
     // Extract emits from defineEmits / Options API
@@ -204,6 +216,15 @@ export class ComponentAnalyzer {
             }
           }
         }
+      }
+
+      // `const X = defineAsyncComponent(() => import("./X.vue"))` is a real
+      // dependency edge, but TypeScript models the dynamic import as a
+      // CallExpression, so isImportDeclaration above never sees it. Without this
+      // the target is absent from the graph entirely.
+      if (ts.isVariableDeclaration(node)) {
+        const asyncImp = this.extractAsyncComponentImport(node, filePath);
+        if (asyncImp) imports.push(asyncImp);
       }
 
       // Find component declaration line + export type + JSDoc
@@ -339,6 +360,164 @@ export class ComponentAnalyzer {
   /**
    * Extract import info from an import declaration AST node
    */
+  /**
+   * Vue lazy registration: `const X = defineAsyncComponent(() => import("path"))`,
+   * or the object form `defineAsyncComponent({ loader: () => import("path") })`.
+   * Reported as a default import so it lands in the same import index that
+   * usedBy/dependsOn and findComponentUsages are built from.
+   */
+  private extractAsyncComponentImport(
+    node: ts.VariableDeclaration,
+    filePath?: string
+  ): ImportInfo | null {
+    if (!ts.isIdentifier(node.name) || !node.initializer) return null;
+    if (!ts.isCallExpression(node.initializer)) return null;
+
+    const callee = node.initializer.expression;
+    if (!ts.isIdentifier(callee) || callee.text !== "defineAsyncComponent") return null;
+
+    const arg = node.initializer.arguments[0];
+    if (!arg) return null;
+
+    const source = this.findDynamicImportSource(arg);
+    if (!source) return null;
+
+    return {
+      type: "default",
+      names: [node.name.text],
+      source,
+      resolvedPath: this.resolveImportPath(source, filePath),
+    };
+  }
+
+  /** Locate the string literal inside a nested `import("...")` call. */
+  private findDynamicImportSource(node: ts.Node): string | undefined {
+    let found: string | undefined;
+    const walk = (n: ts.Node): void => {
+      if (found) return;
+      if (
+        ts.isCallExpression(n) &&
+        n.expression.kind === ts.SyntaxKind.ImportKeyword &&
+        n.arguments.length > 0 &&
+        ts.isStringLiteral(n.arguments[0])
+      ) {
+        found = (n.arguments[0] as ts.StringLiteral).text;
+        return;
+      }
+      ts.forEachChild(n, walk);
+    };
+    walk(node);
+    return found;
+  }
+
+  /**
+   * `<component :is="nameFromMap" />` mounts a locally-registered component by
+   * string, so no literal `<Tag>` exists for the template scan to find.
+   *
+   * Only a binding that is a PLAIN IDENTIFIER can be resolved back to a local
+   * declaration, and only that declaration's own string literals are candidates.
+   * `:is="item.icon"` and `:is="icons[icon]"` name no local symbol and are
+   * skipped: scanning the whole script instead would turn every quoted label
+   * (`label: "Settings"`) and every string in a TS union type (`| "Home"`) into
+   * a phantom child edge.
+   */
+  private extractDynamicMountedChildren(
+    sourceFile: ts.SourceFile,
+    rawContent: string,
+    imports: ImportInfo[]
+  ): string[] {
+    const bindings = extractDynamicComponentBindings(rawContent).filter((b) =>
+      /^[A-Za-z_$][\w$]*$/.test(b)
+    );
+    if (bindings.length === 0) return [];
+
+    const registered = new Set<string>();
+    for (const imp of imports) {
+      for (const n of imp.names) {
+        if (/^[A-Z]/.test(n)) registered.add(n);
+      }
+    }
+
+    // The `:is` target may be declared either as a Composition-API
+    // `const activeTabComponent = computed(...)` or as an Options-API
+    // `computed: { activeTabComponent() {...} }` member. Index both, or the
+    // Options-API modals silently lose their edges.
+    const declInit = new Map<string, ts.Node>();
+    const collect = (n: ts.Node): void => {
+      if (ts.isPropertyAssignment(n) && ts.isIdentifier(n.name)) {
+        if (n.name.text === "components" && ts.isObjectLiteralExpression(n.initializer)) {
+          for (const p of n.initializer.properties) {
+            if (
+              (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) &&
+              ts.isIdentifier(p.name) &&
+              /^[A-Z]/.test(p.name.text)
+            ) {
+              registered.add(p.name.text);
+            }
+          }
+        }
+        if (
+          (n.name.text === "computed" || n.name.text === "methods") &&
+          ts.isObjectLiteralExpression(n.initializer)
+        ) {
+          for (const p of n.initializer.properties) {
+            if (!p.name || !ts.isIdentifier(p.name)) continue;
+            if (ts.isMethodDeclaration(p) && p.body) declInit.set(p.name.text, p.body);
+            else if (ts.isPropertyAssignment(p)) declInit.set(p.name.text, p.initializer);
+            else if (ts.isGetAccessorDeclaration(p) && p.body) declInit.set(p.name.text, p.body);
+          }
+        }
+      }
+      if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer) {
+        declInit.set(n.name.text, n.initializer);
+      }
+      ts.forEachChild(n, collect);
+    };
+    collect(sourceFile);
+
+    const mounted = new Set<string>();
+    for (const binding of bindings) {
+      const init = declInit.get(binding);
+      if (!init) continue;
+      for (const s of this.mountStringsOf(init, declInit)) {
+        if (registered.has(s)) mounted.add(s);
+      }
+    }
+    return Array.from(mounted);
+  }
+
+  /**
+   * String literals reachable from `init`, following ONE level of reference into
+   * a `const map = { ... }` object literal — the common
+   * `const map = {...}; return map[key]` idiom. Only object-literal targets are
+   * followed, so an arbitrary referenced identifier cannot drag in its strings.
+   */
+  private mountStringsOf(
+    init: ts.Node,
+    declInit: Map<string, ts.Node>
+  ): string[] {
+    const strings: string[] = [];
+    const refs = new Set<string>();
+
+    const walk = (n: ts.Node): void => {
+      if (ts.isStringLiteral(n)) strings.push(n.text);
+      else if (ts.isIdentifier(n)) refs.add(n.text);
+      ts.forEachChild(n, walk);
+    };
+    walk(init);
+
+    for (const ref of refs) {
+      const target = declInit.get(ref);
+      if (!target || target === init || !ts.isObjectLiteralExpression(target)) continue;
+      const inner = (n: ts.Node): void => {
+        if (ts.isStringLiteral(n)) strings.push(n.text);
+        ts.forEachChild(n, inner);
+      };
+      inner(target);
+    }
+    return strings;
+  }
+
   private extractImportFromNode(
     node: ts.ImportDeclaration,
     filePath?: string
