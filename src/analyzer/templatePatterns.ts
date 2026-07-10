@@ -20,6 +20,7 @@ import {
   expressionSource,
   eventBindings,
   staticTextOf,
+  governingConditions,
 } from "./sfcParser.js";
 
 /**
@@ -86,12 +87,16 @@ export function analyzeVueTemplatePatterns(
     if (source) {
       const click = eventBindings(el).find((ev) => ev.event === "click");
       const viaTeleport = ancestors.some((a) => pascalize(a.tag) === "Teleport");
+      // v-if unmounts the backdrop; v-show keeps it in the DOM/a11y tree —
+      // a drift axis the audit rubric cares about.
+      const rendering = governingConditions(el, ancestors);
       overlays.push({
         tag: el.tag,
         classes: [...new Set(matched)].sort(),
         source,
         ...(click ? { clickHandler: { bound: true as const, modifiers: click.modifiers, expression: click.expression } } : {}),
         ...(viaTeleport ? { viaTeleport: true } : {}),
+        ...(rendering ? { rendering } : {}),
         line: el.loc.start.line,
       });
     }

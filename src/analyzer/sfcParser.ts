@@ -9,6 +9,7 @@ import type {
   DirectiveNode,
   ExpressionNode,
 } from "@vue/compiler-dom";
+import type { RenderConditions } from "../types.js";
 
 /**
  * Shared entry point to @vue/compiler-sfc for the analyzer modules.
@@ -192,6 +193,33 @@ export function eventBindings(el: ElementNode): TemplateEventBinding[] {
     });
   }
   return out;
+}
+
+/**
+ * The nearest v-if (or v-else-if / v-else), v-show, and v-for governing an
+ * element — on itself or any ancestor, each kind resolved independently to the
+ * closest occurrence. A bare v-else records "(else)". Returns undefined when
+ * the element renders unconditionally.
+ */
+export function governingConditions(
+  el: ElementNode,
+  ancestors: readonly ElementNode[]
+): RenderConditions | undefined {
+  const clip = (s: string) => s.replace(/\s+/g, " ").trim().slice(0, 80);
+  const found: RenderConditions = {};
+  // Self first, then ancestors nearest-to-outermost.
+  for (let i = ancestors.length; i >= 0; i--) {
+    const node = i === ancestors.length ? el : ancestors[i];
+    for (const p of node.props) {
+      if (p.type !== NodeTypes.DIRECTIVE) continue;
+      const exp = p.exp ? clip(expressionSource(p.exp)) : "";
+      if ((p.name === "if" || p.name === "else-if") && found.vIf === undefined) found.vIf = exp;
+      else if (p.name === "else" && found.vIf === undefined) found.vIf = "(else)";
+      else if (p.name === "show" && found.vShow === undefined) found.vShow = exp;
+      else if (p.name === "for" && found.vFor === undefined) found.vFor = exp;
+    }
+  }
+  return Object.keys(found).length ? found : undefined;
 }
 
 /** Static text content of a subtree — nested tags descended into, {{ mustaches }} skipped. */

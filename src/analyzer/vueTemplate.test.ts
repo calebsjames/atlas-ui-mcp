@@ -7,6 +7,8 @@ import {
   extractChildEventBindings,
   extractDynamicComponentBindings,
   extractVueTemplateSelectors,
+  extractStyleBlocks,
+  extractDocsBlock,
 } from "./vueTemplate.js";
 import { analyzeVueTemplatePatterns } from "./templatePatterns.js";
 import { parseSfc, scriptAbsoluteLine } from "./sfcParser.js";
@@ -236,6 +238,81 @@ test(":class expressions: string tokens and identifiers count, comment prose doe
     ]" />`)
   );
   assert.equal(withComment?.headerRegions, undefined);
+});
+
+// -- rendering conditions -----------------------------------------------------
+
+test("children record their governing v-if / v-show / v-for", () => {
+  const { childComponentRendering } = analyzeVueTemplate(
+    sfc(`
+      <div v-if="isOpen">
+        <ModalBody />
+      </div>
+      <Spinner v-show="loading" />
+      <RowCard v-for="row in rows" :key="row.id" />
+      <div v-if="a"><TabA /></div>
+      <div v-else><TabB /></div>
+      <Footer />`)
+  );
+  assert.deepEqual(childComponentRendering, {
+    ModalBody: { vIf: "isOpen" },
+    Spinner: { vShow: "loading" },
+    RowCard: { vFor: "row in rows" },
+    TabA: { vIf: "a" },
+    TabB: { vIf: "(else)" },
+    // Footer: absent — always mounted
+  });
+});
+
+test("one unconditional usage clears a child's rendering entry", () => {
+  const { childComponentRendering } = analyzeVueTemplate(
+    sfc(`
+      <div v-if="compact"><UserBadge /></div>
+      <UserBadge />`)
+  );
+  assert.deepEqual(childComponentRendering, {});
+});
+
+test("nearest governing directive wins per kind", () => {
+  const { childComponentRendering } = analyzeVueTemplate(
+    sfc(`
+      <div v-if="outer">
+        <section v-if="inner" v-for="x in xs">
+          <Leaf />
+        </section>
+      </div>`)
+  );
+  assert.deepEqual(childComponentRendering, {
+    Leaf: { vIf: "inner", vFor: "x in xs" },
+  });
+});
+
+test("overlays record v-if vs v-show gating", () => {
+  const patterns = analyzeVueTemplatePatterns(
+    sfc(`
+      <div v-show="isOpen" class="fixed inset-0 bg-black/50" @click.self="close" />
+      <div v-if="hasScrim" class="overlay" />`)
+  );
+  assert.deepEqual(patterns?.overlays?.map((o) => o.rendering), [
+    { vShow: "isOpen" },
+    { vIf: "hasScrim" },
+  ]);
+});
+
+// -- styles and docs ------------------------------------------------------------
+
+test("style blocks report scoped/global, lang, and v-bind coupling", () => {
+  const src = `<template>\n  <div class="a" />\n</template>\n<style scoped lang="scss">\n.a { color: v-bind(accent); }\n</style>\n<style>\n.global { margin: 0; }\n</style>\n`;
+  assert.deepEqual(extractStyleBlocks(src), [
+    { line: 4, scoped: true, lang: "scss", hasVBind: true },
+    { line: 7 },
+  ]);
+});
+
+test("a <docs> block provides the component description", () => {
+  const src = `<template><div /></template>\n<docs>\nRenders the station status pill.\n</docs>\n`;
+  assert.equal(extractDocsBlock(src), "Renders the station status pill.");
+  assert.equal(extractDocsBlock(`<template><div /></template>`), undefined);
 });
 
 test("z-index from <style> blocks keeps absolute lines and selectors", () => {

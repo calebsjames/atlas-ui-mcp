@@ -20,6 +20,8 @@ import {
   extractChildEventBindings,
   extractVueTemplateSelectors,
   extractDynamicComponentBindings,
+  extractStyleBlocks,
+  extractDocsBlock,
 } from "./vueTemplate.js";
 import { extractVueEmits, extractEmitLiveness } from "./vueEmits.js";
 import { parseSfc, scriptAbsoluteLine } from "./sfcParser.js";
@@ -138,6 +140,9 @@ export class ComponentAnalyzer {
         ...templateAnalysis.childComponentLines,
       };
     }
+    if (Object.keys(templateAnalysis.childComponentRendering).length) {
+      base.childComponentRendering = templateAnalysis.childComponentRendering;
+    }
     base.eventHandlers = [...new Set([...(base.eventHandlers || []), ...templateAnalysis.eventHandlers])].sort();
 
     // Extract emits from defineEmits / Options API
@@ -158,6 +163,17 @@ export class ComponentAnalyzer {
     // Template-layer design signals: overlay/backdrop, Teleport, z-index, header.
     const templatePatterns = analyzeVueTemplatePatterns(rawContent, this.config?.templatePatterns);
     if (templatePatterns) base.templatePatterns = templatePatterns;
+
+    // <style> block metadata (scoped vs global, lang, v-bind() coupling).
+    const styleBlocks = extractStyleBlocks(rawContent);
+    if (styleBlocks.length) base.styleBlocks = styleBlocks;
+
+    // A <docs> custom block is the SFC's own documentation — use it when the
+    // script yielded no JSDoc description.
+    if (!base.description) {
+      const docs = extractDocsBlock(rawContent);
+      if (docs) base.description = docs;
+    }
 
     // Detect v-model bindings: emits matching "update:xxx" pattern
     const vModelBindings = (base.emits ?? [])

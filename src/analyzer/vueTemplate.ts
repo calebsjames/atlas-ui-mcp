@@ -1,5 +1,5 @@
 import type { ElementNode } from "@vue/compiler-dom";
-import type { ChildEventBinding, FormFieldInfo } from "../types.js";
+import type { ChildEventBinding, FormFieldInfo, RenderConditions, StyleBlockInfo } from "../types.js";
 import { buildFormField, FORM_CONTROL_TAGS } from "./formFields.js";
 import {
   parseSfc,
@@ -10,6 +10,7 @@ import {
   staticAttr,
   boundExpr,
   eventBindings,
+  governingConditions,
 } from "./sfcParser.js";
 
 /**
@@ -81,25 +82,40 @@ export function extractDynamicComponentBindings(fullContent: string): string[] {
 export function analyzeVueTemplate(fullContent: string): {
   childComponents: string[];
   childComponentLines: Record<string, number>;
+  /** Only children NEVER rendered unconditionally — one unguarded usage clears the entry. */
+  childComponentRendering: Record<string, RenderConditions>;
   eventHandlers: string[];
 } {
   const { templateAst } = parseSfc(fullContent);
-  if (!templateAst) return { childComponents: [], childComponentLines: {}, eventHandlers: [] };
+  if (!templateAst) {
+    return { childComponents: [], childComponentLines: {}, childComponentRendering: {}, eventHandlers: [] };
+  }
 
   const childComponentLines: Record<string, number> = {};
+  // null = an unconditional usage was seen; "always mounted" beats any guard.
+  const rendering = new Map<string, RenderConditions | null>();
   const eventHandlers = new Set<string>();
-  walkElements(templateAst, (el) => {
+  walkElements(templateAst, (el, ancestors) => {
     const name = namedChildComponent(el);
-    if (name && !(name in childComponentLines)) childComponentLines[name] = el.loc.start.line;
+    if (name) {
+      if (!(name in childComponentLines)) childComponentLines[name] = el.loc.start.line;
+      const cond = governingConditions(el, ancestors);
+      if (!cond) rendering.set(name, null);
+      else if (!rendering.has(name)) rendering.set(name, cond);
+    }
     // Same shape the regex produced: "click.self", "update:model-value".
     for (const ev of eventBindings(el)) {
       eventHandlers.add([ev.event, ...ev.modifiers].join("."));
     }
   });
 
+  const childComponentRendering: Record<string, RenderConditions> = {};
+  for (const [name, cond] of rendering) if (cond) childComponentRendering[name] = cond;
+
   return {
     childComponents: Object.keys(childComponentLines).sort(),
     childComponentLines,
+    childComponentRendering,
     eventHandlers: Array.from(eventHandlers).sort(),
   };
 }
@@ -164,4 +180,24 @@ export function extractVueTemplateSelectors(fullContent: string): {
   });
 
   return { testIds: Object.keys(testIdLines).sort(), testIdLines, formFields };
+}
+
+/** Per-<style>-block metadata. An unscoped, non-module block leaks selectors globally. */
+export function extractStyleBlocks(content: string): StyleBlockInfo[] {
+  const d = parseSfc(content).descriptor;
+  if (!d) return [];
+  return d.styles.map((s) => ({
+    line: s.loc.start.line,
+    ...(s.scoped ? { scoped: true } : {}),
+    ...(s.module ? { module: true } : {}),
+    ...(s.lang ? { lang: s.lang } : {}),
+    ...(/\bv-bind\(/.test(s.content) ? { hasVBind: true } : {}),
+  }));
+}
+
+/** Content of a <docs> custom block — the SFC's own documentation surface. */
+export function extractDocsBlock(content: string): string | undefined {
+  const docs = parseSfc(content).descriptor?.customBlocks.find((b) => b.type === "docs");
+  const text = docs?.content.trim();
+  return text ? text.slice(0, 500) : undefined;
 }
