@@ -6,11 +6,31 @@ import { extractTemplateBlock } from "./vueTemplate.js";
  * Options API) and which of those actually fire.
  */
 
-/** Declared emits from defineEmits<...>(), defineEmits([...]), or `emits:` options. */
+/** `defineModel()` → "modelValue"; `defineModel("title", {...})` → "title". */
+function modelNameOf(call: ts.CallExpression): string {
+  const first = call.arguments[0];
+  return first && ts.isStringLiteral(first) ? first.text : "modelValue";
+}
+
+function isDefineModelCall(node: ts.Node): node is ts.CallExpression {
+  return (
+    ts.isCallExpression(node) &&
+    ts.isIdentifier(node.expression) &&
+    node.expression.text === "defineModel"
+  );
+}
+
+/**
+ * Declared emits from defineEmits<...>(), defineEmits([...]), `emits:` options,
+ * or the implicit `update:<name>` a defineModel() macro declares.
+ */
 export function extractVueEmits(sourceFile: ts.SourceFile): string[] {
   const emits: string[] = [];
 
   const visit = (node: ts.Node) => {
+    if (isDefineModelCall(node)) {
+      emits.push(`update:${modelNameOf(node)}`);
+    }
     if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "defineEmits") {
       // Pattern 1: defineEmits<{ (e: "name", val: T): void }>()
       if (node.typeArguments?.[0] && ts.isTypeLiteralNode(node.typeArguments[0])) {
@@ -150,6 +170,11 @@ export function extractEmitLiveness(
 
   // Script call sites: emit('x', ...), *.$emit('x', ...), and ctx.emit('x', ...).
   const visit = (node: ts.Node) => {
+    // defineModel wires its own `update:<name>` emit: the runtime fires it
+    // whenever the model ref is written, so no explicit emit() call site
+    // exists to find. Treat it as fired — reporting it dead would be wrong
+    // for every component consumed via v-model.
+    if (isDefineModelCall(node)) fired.add(`update:${modelNameOf(node)}`);
     if (ts.isCallExpression(node)) {
       const callee = node.expression;
       if (ts.isIdentifier(callee) && emitVars.has(callee.text)) recordFirstArg(node);

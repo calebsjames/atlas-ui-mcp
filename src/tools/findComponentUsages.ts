@@ -13,6 +13,16 @@ export interface ComponentUsage {
   usageType: "jsx" | "import" | "template";
 }
 
+interface UsagePatterns {
+  jsx: RegExp;
+  import: RegExp;
+  asyncImport: RegExp;
+  stringMount: RegExp;
+}
+
+/** `<component :is="...">` anywhere in the file. Non-global: used only as a test. */
+const DYNAMIC_MOUNT_RE = /<component\b[^>]*(?::is|v-bind:is|\bis)\s*=/;
+
 /**
  * Find all components that use (import and render) a specific component.
  * Uses indexed cache for fast initial lookup, then scans files for line numbers.
@@ -49,9 +59,26 @@ export async function findComponentUsages(
     "g"
   );
 
+  // `const Name = defineAsyncComponent(() => import("..."))` — a genuine import
+  // that the static-import pattern above cannot match.
+  const asyncImportRegex = new RegExp(
+    `\\b${escapedName}\\s*=\\s*defineAsyncComponent\\b`,
+    "g"
+  );
+  // `<component :is="nameFromMap">` mounts by string, so the quoted name is the
+  // mount site. Only applied to files that actually contain a dynamic mount.
+  const stringMountRegex = new RegExp(`["'\`]${escapedName}["'\`]`, "g");
+
   const hookCallRegex = name.startsWith("use")
     ? new RegExp(`\\b${escapedName}\\s*\\(`, "g")
     : null;
+
+  const patterns: UsagePatterns = {
+    jsx: jsxRegex,
+    import: importRegex,
+    asyncImport: asyncImportRegex,
+    stringMount: stringMountRegex,
+  };
 
   const importers = cache.getImportersOf(name);
   const renderers = cache.getRenderersOf(name);
@@ -71,8 +98,7 @@ export async function findComponentUsages(
       await readFileSafe(candidate.path),
       candidate.relativePath,
       candidate.name,
-      jsxRegex,
-      importRegex,
+      patterns,
       usages
     );
   }
@@ -96,7 +122,7 @@ export async function findComponentUsages(
   const referenceFiles = await loadReferenceContents(workspaceRoot, config);
   for (const [relativePath, content] of referenceFiles) {
     const componentName = path.basename(relativePath, path.extname(relativePath));
-    scanFileForUsages(content, relativePath, componentName, jsxRegex, importRegex, usages);
+    scanFileForUsages(content, relativePath, componentName, patterns, usages);
     if (hookCallRegex) {
       scanLinesForHookCalls(content, relativePath, componentName, hookCallRegex, usages);
     }
@@ -144,8 +170,7 @@ function scanFileForUsages(
   content: string | null,
   relativePath: string,
   componentName: string,
-  jsxRegex: RegExp,
-  importRegex: RegExp,
+  patterns: UsagePatterns,
   usages: ComponentUsage[]
 ): void {
   const isVue = relativePath.endsWith(".vue");
@@ -161,11 +186,21 @@ function scanFileForUsages(
     return;
   }
 
+  const pairs: [RegExp, ComponentUsage["usageType"]][] = [
+    [patterns.jsx, templateUsageType],
+    [patterns.import, "import"],
+    [patterns.asyncImport, "import"],
+  ];
+  // A bare quoted name is only a mount when the file dynamically mounts something.
+  if (DYNAMIC_MOUNT_RE.test(content)) {
+    pairs.push([patterns.stringMount, templateUsageType]);
+  }
+
   const lines = content.split("\n");
   for (let idx = 0; idx < lines.length; idx++) {
     const line = lines[idx];
 
-    for (const [regex, type] of [[jsxRegex, templateUsageType], [importRegex, "import"]] as [RegExp, "jsx" | "import" | "template"][]) {
+    for (const [regex, type] of pairs) {
       regex.lastIndex = 0;
       if (!regex.test(line)) continue;
       usages.push({

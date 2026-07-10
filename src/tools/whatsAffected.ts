@@ -50,6 +50,11 @@ export interface AffectedItem {
   seed?: string;
   /** The immediate downstream dependency that links this item into the graph. */
   via?: string;
+  /** Set when this item mounts that dependency (`via`, or the seed at
+   *  distance 1) behind a template guard — e.g. "v-if: selectedStation".
+   *  v-if gates mounting entirely; v-show only visibility. Drive the guard
+   *  when verifying, or the change won't be exercised on this path. */
+  gatedBy?: string;
 }
 
 export interface AffectedRoute {
@@ -198,6 +203,7 @@ export async function whatsAffected(
     distance: v.distance,
     ...(v.seed && v.distance > 0 ? { seed: v.seed.name } : {}),
     ...(v.parent && v.distance > 1 ? { via: v.parent.name } : {}),
+    ...(v.gate ? { gatedBy: v.gate } : {}),
   }));
 
   const rootHit = affectedAll.find((v) => v.item.architectureLayer === "root");
@@ -239,6 +245,21 @@ export async function whatsAffected(
   });
   seedRisks.forEach((risk, i) => {
     changedFiles[seedEntryIndexes[i]].risk = risk;
+  });
+
+  // When EVERY direct dependent mounts a seed behind a guard, loading an
+  // affected route won't exercise the change — the verifying agent has to
+  // drive the gate (open the modal, select the row, …). Say so once.
+  seeds.forEach((seed, i) => {
+    const direct = [...perSeedVisited[i].values()].filter((n) => n.distance === 1);
+    if (direct.length > 0 && direct.every((n) => n.gate)) {
+      const example = direct[0];
+      notes.push(
+        `${seed.name} is only reached behind template guards (e.g. ${example.item.name}: ${example.gate}; ` +
+          `see gatedBy on affectedItems) — page load alone won't exercise this change. ` +
+          `v-if gates mounting entirely; v-show only visibility.`
+      );
+    }
   });
 
   if (maxDistance < MAX_DEPTH && seeds.length > 0) {
@@ -332,6 +353,21 @@ interface VisitedNode {
   seed?: Component;
   /** The immediate downstream node whose edge pulled this one in. */
   parent?: Component;
+  /** Template guard this node mounts `parent` behind, when it does. */
+  gate?: string;
+}
+
+/** How `parent` gates its template mount of `child`, when it does. */
+function renderGate(parent: Component, child: Component): string | undefined {
+  const conditions =
+    parent.childComponentRendering?.[child.name] ??
+    (child.fileAlias ? parent.childComponentRendering?.[child.fileAlias] : undefined);
+  if (!conditions) return undefined;
+  const parts: string[] = [];
+  if (conditions.vIf) parts.push(`v-if: ${conditions.vIf}`);
+  if (conditions.vShow) parts.push(`v-show: ${conditions.vShow}`);
+  if (conditions.vFor) parts.push(`v-for: ${conditions.vFor}`);
+  return parts.length ? parts.join("; ") : undefined;
 }
 
 function bfsUpstream(
@@ -359,11 +395,13 @@ function bfsUpstream(
     for (const user of upstreamUsers(current.item, cache, hookUsers)) {
       const key = toForwardSlashes(user.relativePath);
       if (visited.has(key)) continue;
+      const gate = renderGate(user, current.item);
       const next: VisitedNode = {
         item: user,
         distance: current.distance + 1,
         seed: current.seed,
         parent: current.item,
+        ...(gate ? { gate } : {}),
       };
       visited.set(key, next);
       queue.push(next);

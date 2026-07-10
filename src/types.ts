@@ -169,12 +169,17 @@ export interface Component {
 
   // Epic 001 enhancements
   childComponents?: string[]; // PascalCase JSX elements rendered
+  childComponentLines?: Record<string, number>; // first usage line per child (template/JSX)
+  // Children that are NEVER rendered unconditionally, with the governing
+  // directive expressions. Absent child = always mounted when the parent is.
+  childComponentRendering?: Record<string, RenderConditions>;
   eventHandlers?: string[]; // onClick, onSubmit, etc.
   imports?: ImportInfo[]; // Import statements
   dataFetchingPattern?: string; // "react-query" | "swr" | "useEffect-fetch" | etc.
 
   // Concrete selectors so agents can drive capture_flow without reading source
   testIds?: string[]; // data-testid attribute values
+  testIdLines?: Record<string, number>; // first usage line per data-testid value
   formFields?: FormFieldInfo[]; // form controls with usable selectors
 
   // Store layer (Pinia / Zustand / Redux Toolkit)
@@ -193,6 +198,10 @@ export interface Component {
   // the child never fires).
   childEventBindings?: ChildEventBinding[];
   templatePatterns?: TemplatePatterns; // overlay/teleport/z-index/header design signals
+  // Recoverable SFC syntax errors — analysis reflects the parser's recovery,
+  // so results for this file may be partial (capped list).
+  sfcParseErrors?: Array<{ message: string; line?: number }>;
+  styleBlocks?: StyleBlockInfo[]; // <style> blocks: scoped/global, lang, v-bind()
 
   // Hook-specific metadata
   parameters?: string[]; // Function parameters for hooks
@@ -304,6 +313,20 @@ export interface ComponentProps {
 export interface ChildEventBinding {
   component: string; // child component tag (PascalCase as written in the template)
   events: string[]; // event names listened for, modifiers stripped (e.g. "status-updated")
+  lines?: Record<string, number>; // first 1-based file line of each event's binding
+}
+
+/**
+ * The nearest v-if / v-show / v-for governing an element (on itself or an
+ * ancestor). Each field is the directive's expression source; a bare v-else
+ * records "(else)". Absent field = not governed by that directive kind.
+ * Note the semantics differ: v-if gates MOUNTING (component not created),
+ * v-show only toggles visibility (still mounted, still fetching).
+ */
+export interface RenderConditions {
+  vIf?: string;
+  vShow?: string;
+  vFor?: string;
 }
 
 /** A modal/overlay/backdrop element detected in a template. */
@@ -315,7 +338,19 @@ export interface OverlayPattern {
   // backdrop-only-close modifier; a bare @click on a backdrop is a common bug.
   clickHandler?: { bound: true; modifiers: string[]; expression: string };
   viaTeleport?: boolean; // rendered inside a <Teleport>
+  // How the overlay is gated: v-show keeps it mounted (and in the a11y tree /
+  // stacking context); v-if removes it — a common drift axis for backdrops.
+  rendering?: RenderConditions;
   line?: number; // 1-based line in the SFC
+}
+
+/** One <style> block of an SFC. Unscoped blocks leak selectors globally. */
+export interface StyleBlockInfo {
+  line: number; // 1-based line where the block starts
+  scoped?: boolean;
+  module?: boolean; // <style module> (CSS modules)
+  lang?: string; // "scss", "less", … (absent for plain css)
+  hasVBind?: boolean; // uses v-bind() in CSS — reactive script/style coupling
 }
 
 /** A z-index value found in a <style> block, inline style, or utility class. */
@@ -364,10 +399,13 @@ export interface ComponentAnalysis {
   stateVariables?: string[];
   accessibility?: AccessibilityInfo;
   childComponents?: string[];
+  childComponentLines?: Record<string, number>;
+  childComponentRendering?: Record<string, RenderConditions>;
   eventHandlers?: string[];
   imports?: ImportInfo[];
   dataFetchingPattern?: string;
   testIds?: string[];
+  testIdLines?: Record<string, number>;
   formFields?: FormFieldInfo[];
   storeCalls?: string[];
   storeName?: string;
@@ -378,6 +416,8 @@ export interface ComponentAnalysis {
   emitsDynamic?: boolean;
   childEventBindings?: ChildEventBinding[];
   templatePatterns?: TemplatePatterns;
+  sfcParseErrors?: Array<{ message: string; line?: number }>;
+  styleBlocks?: StyleBlockInfo[];
   vModelBindings?: string[];
   parameters?: string[];
   returnType?: string;

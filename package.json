@@ -26,6 +26,8 @@
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "@vue/compiler-dom": "^3.5.39",
+    "@vue/compiler-sfc": "^3.5.39",
     "playwright": "^1.61.1",
     "typescript": "^5.3.3"
   },

@@ -1,11 +1,24 @@
-import type { ChildEventBinding, FormFieldInfo } from "../types.js";
-import { buildFormField } from "./formFields.js";
+import type { ElementNode } from "@vue/compiler-dom";
+import type { ChildEventBinding, FormFieldInfo, RenderConditions, StyleBlockInfo } from "../types.js";
+import { buildFormField, FORM_CONTROL_TAGS } from "./formFields.js";
+import {
+  parseSfc,
+  scriptBlocks,
+  walkElements,
+  isComponentElement,
+  pascalize,
+  staticAttr,
+  boundExpr,
+  eventBindings,
+  governingConditions,
+} from "./sfcParser.js";
 
 /**
- * Regex-based analysis of Vue SFC <template> blocks. The template isn't part
- * of the <script> AST, so these scanners work on the raw file content — an
- * accepted tradeoff for HTML-ish markup (see FUTURE ticket to revisit with
- * @vue/compiler-sfc).
+ * Vue SFC <template> analysis on the @vue/compiler-sfc AST (via sfcParser).
+ * These were regex scanners over raw file content; the compiler parse fixes
+ * the failure modes regex could not see past: commented-out markup counted as
+ * live, kebab-case event names truncated at the hyphen, closing tags split
+ * across lines by prettier, and single-letter components (`<X />`) missed.
  */
 
 export const VUE_BUILTINS = new Set([
@@ -13,149 +26,178 @@ export const VUE_BUILTINS = new Set([
   "Component", "Slot",
 ]);
 
-/** Extract <script> or <script setup> content from a .vue SFC. */
-export function extractVueScript(content: string): string {
-  const scriptMatch = content.match(/<script\b[^>]*>([\s\S]*?)<\/script>/);
-  return scriptMatch ? scriptMatch[1] : "";
+/**
+ * The PascalCase name of a component element that names a real child — the
+ * dynamic `<component>` mount and Vue builtins don't. Kebab-case usages
+ * (`<my-thing>`) normalize to the name they were registered/imported under.
+ */
+function namedChildComponent(el: ElementNode): string | undefined {
+  if (!isComponentElement(el) || el.tag === "component") return undefined;
+  const name = pascalize(el.tag);
+  return VUE_BUILTINS.has(name) ? undefined : name;
 }
 
 /**
- * Extract the top-level <template> block's inner content, or undefined if
- * there is none. Vue templates NEST <template> elements (named slots:
- * `<template #footer>`), so a lazy match to the first closing tag truncated
- * everything past the first slot — silently hiding later fire sites, child
- * components, and bindings. Track nesting depth instead.
+ * Extract the script content of a .vue SFC for TS AST analysis. When both
+ * <script> and <script setup> exist, both are included in file order (the
+ * old regex silently dropped the second block).
  */
-export function extractTemplateBlock(content: string): string | undefined {
-  const open = content.match(/<template\b[^>]*>/);
-  if (!open || open.index === undefined) return undefined;
-  const start = open.index + open[0].length;
-  if (open[0].endsWith("/>")) return undefined; // degenerate self-closing root
-
-  const tag = /<template\b[^>]*>|<\/template>/g;
-  tag.lastIndex = start;
-  let depth = 1;
-  let m: RegExpExecArray | null;
-  while ((m = tag.exec(content))) {
-    if (m[0].endsWith("/>")) continue; // self-closing: neither opens nor closes
-    depth += m[0] === "</template>" ? -1 : 1;
-    if (depth === 0) return content.slice(start, m.index);
+export function extractVueScript(content: string): string {
+  if (!parseSfc(content).descriptor) {
+    // parse() threw (it reports recoverable errors in-band, so this should
+    // not happen) — degrade to the old first-block regex.
+    const m = content.match(/<script\b[^>]*>([\s\S]*?)<\/script>/);
+    return m ? m[1] : "";
   }
-  // Unbalanced markup: better the whole remainder than a truncated block.
-  return content.slice(start);
+  return scriptBlocks(content)
+    .map((b) => b.content)
+    .join("\n");
 }
 
-/** PascalCase child components and event handlers bound in the template. */
+/** Inner content of the top-level <template> block, or undefined if none. */
+export function extractTemplateBlock(content: string): string | undefined {
+  return parseSfc(content).descriptor?.template?.content;
+}
+
+/**
+ * The expressions bound to `<component :is="...">`, in source order. Such a
+ * mount leaves no literal `<Tag>` for the template scan, so callers must resolve
+ * the target from script. Returns the raw expression — `activeTabComponent`,
+ * `item.icon`, `icons[icon]` — and leaves interpretation to the caller.
+ */
+export function extractDynamicComponentBindings(fullContent: string): string[] {
+  const { templateAst } = parseSfc(fullContent);
+  if (!templateAst) return [];
+
+  const bindings: string[] = [];
+  walkElements(templateAst, (el) => {
+    if (pascalize(el.tag) !== "Component") return;
+    const expr = boundExpr(el, "is");
+    if (expr !== undefined) bindings.push(expr.replace(/\s+/g, " ").trim());
+  });
+  return bindings;
+}
+
+/** Child components rendered by the template, and the event names it binds. */
 export function analyzeVueTemplate(fullContent: string): {
   childComponents: string[];
+  childComponentLines: Record<string, number>;
+  /** Only children NEVER rendered unconditionally — one unguarded usage clears the entry. */
+  childComponentRendering: Record<string, RenderConditions>;
   eventHandlers: string[];
 } {
-  const template = extractTemplateBlock(fullContent);
-  if (template === undefined) return { childComponents: [], eventHandlers: [] };
-
-  // PascalCase component usages: <ComponentName or <ComponentName>
-  const childComponents = new Set<string>();
-  const componentRegex = /<([A-Z][A-Za-z0-9]+)[\s/>]/g;
-  let match;
-  while ((match = componentRegex.exec(template))) {
-    if (!VUE_BUILTINS.has(match[1])) {
-      childComponents.add(match[1]);
-    }
+  const { templateAst } = parseSfc(fullContent);
+  if (!templateAst) {
+    return { childComponents: [], childComponentLines: {}, childComponentRendering: {}, eventHandlers: [] };
   }
 
-  // Event handlers: @eventName="..." or v-on:eventName="..."
+  const childComponentLines: Record<string, number> = {};
+  // null = an unconditional usage was seen; "always mounted" beats any guard.
+  const rendering = new Map<string, RenderConditions | null>();
   const eventHandlers = new Set<string>();
-  const eventRegex = /(?:@|v-on:)([\w:.]+)/g;
-  while ((match = eventRegex.exec(template))) {
-    eventHandlers.add(match[1]);
-  }
+  walkElements(templateAst, (el, ancestors) => {
+    const name = namedChildComponent(el);
+    if (name) {
+      if (!(name in childComponentLines)) childComponentLines[name] = el.loc.start.line;
+      const cond = governingConditions(el, ancestors);
+      if (!cond) rendering.set(name, null);
+      else if (!rendering.has(name)) rendering.set(name, cond);
+    }
+    // Same shape the regex produced: "click.self", "update:model-value".
+    for (const ev of eventBindings(el)) {
+      eventHandlers.add([ev.event, ...ev.modifiers].join("."));
+    }
+  });
+
+  const childComponentRendering: Record<string, RenderConditions> = {};
+  for (const [name, cond] of rendering) if (cond) childComponentRendering[name] = cond;
 
   return {
-    childComponents: Array.from(childComponents).sort(),
+    childComponents: Object.keys(childComponentLines).sort(),
+    childComponentLines,
+    childComponentRendering,
     eventHandlers: Array.from(eventHandlers).sort(),
   };
 }
 
 /**
- * For each child component the template renders, collect the events the parent
- * listens for on it (`@event` / `v-on:event`, modifiers stripped). Attribute-
- * level regex, in the same spirit as analyzeVueTemplate — precise enough to
- * cross-check against the child's real emits without a full template parser.
+ * For each child component the template renders, the events the parent listens
+ * for on it (`@event` / `v-on:event`, modifiers stripped). Names are recorded
+ * as written (`update:model-value`); consumers cross-checking against a child's
+ * declared emits normalize case/hyphens the way Vue's runtime does.
  */
 export function extractChildEventBindings(fullContent: string): ChildEventBinding[] {
-  const template = extractTemplateBlock(fullContent);
-  if (template === undefined) return [];
+  const { templateAst } = parseSfc(fullContent);
+  if (!templateAst) return [];
 
-  // Opening tags of PascalCase components, capturing the attribute blob.
-  const tagRegex = /<([A-Z][A-Za-z0-9]*)((?:[^>"']|"[^"]*"|'[^']*')*?)\/?>/g;
-  const byComponent = new Map<string, Set<string>>();
-  let tag: RegExpExecArray | null;
-  while ((tag = tagRegex.exec(template))) {
-    const name = tag[1];
-    if (VUE_BUILTINS.has(name)) continue;
-    const attrs = tag[2] || "";
-    // @event="..." or v-on:event="..." — event name only, up to a modifier dot.
-    const evRegex = /(?:@|v-on:)([A-Za-z][\w-]*)/g;
-    let ev: RegExpExecArray | null;
-    while ((ev = evRegex.exec(attrs))) {
-      const set = byComponent.get(name) ?? new Set<string>();
-      set.add(ev[1]);
-      byComponent.set(name, set);
+  const byComponent = new Map<string, Record<string, number>>();
+  walkElements(templateAst, (el) => {
+    const name = namedChildComponent(el);
+    if (!name) return;
+    for (const ev of eventBindings(el)) {
+      const lines = byComponent.get(name) ?? {};
+      if (!(ev.event in lines)) lines[ev.event] = ev.line;
+      byComponent.set(name, lines);
     }
-  }
+  });
 
   return [...byComponent.entries()]
-    .map(([component, events]) => ({ component, events: [...events].sort() }))
+    .map(([component, lines]) => ({ component, events: Object.keys(lines).sort(), lines }))
     .sort((a, b) => a.component.localeCompare(b.component));
 }
 
-/** Read a single static attribute value out of a raw HTML/Vue tag's attribute string.
- * The `(?<![:\w-])` guard rejects dynamic bindings (`:name`, `v-bind:name`) and
- * hyphenated look-alikes (`data-type` when matching `type`). */
-export function matchTemplateAttr(attrs: string, name: string): string | undefined {
-  const m = attrs.match(new RegExp(`(?<![:\\w-])${name}=["']([^"']+)["']`));
-  return m ? m[1] : undefined;
-}
-
 /**
- * Vue selectors come from the <template>, which isn't in the <script> AST, so
- * we scan it with regex (HTML-ish content — the same tradeoff as accessibility).
- * Only lowercase intrinsic tags are treated as form controls; PascalCase Vue
- * components are ignored. Dynamic-bound attributes (`:id`, `v-bind:*`) are skipped.
+ * Drivable selectors from the <template>: data-testid values anywhere, and
+ * intrinsic form controls with their static attributes. Dynamic bindings
+ * (`:id`, `v-bind:*`) are skipped — a selector we can't type into the browser
+ * is worse than none.
  */
 export function extractVueTemplateSelectors(fullContent: string): {
   testIds: string[];
+  testIdLines: Record<string, number>;
   formFields: FormFieldInfo[];
 } {
-  const template = extractTemplateBlock(fullContent);
-  if (template === undefined) return { testIds: [], formFields: [] };
+  const { templateAst } = parseSfc(fullContent);
+  if (!templateAst) return { testIds: [], testIdLines: {}, formFields: [] };
 
-  const testIds = Array.from(
-    new Set(
-      Array.from(template.matchAll(/(?<![:\w-])data-testid=["']([^"']+)["']/g)).map((m) => m[1])
-    )
-  ).sort();
-
+  const testIdLines: Record<string, number> = {};
   const formFields: FormFieldInfo[] = [];
-  const controlRegex = /<(input|select|textarea|button)\b([^>]*)>/g;
-  let match: RegExpExecArray | null;
-  while ((match = controlRegex.exec(template))) {
-    const element = match[1];
-    const attrs = match[2];
-    const label =
-      matchTemplateAttr(attrs, "aria-label") ??
-      matchTemplateAttr(attrs, "placeholder");
+  walkElements(templateAst, (el) => {
+    const tid = staticAttr(el, "data-testid");
+    if (tid && !(tid in testIdLines)) testIdLines[tid] = el.loc.start.line;
+
+    if (isComponentElement(el) || !FORM_CONTROL_TAGS.has(el.tag)) return;
     formFields.push(
       buildFormField({
-        element,
-        inputType: matchTemplateAttr(attrs, "type"),
-        name: matchTemplateAttr(attrs, "name"),
-        id: matchTemplateAttr(attrs, "id"),
-        testId: matchTemplateAttr(attrs, "data-testid"),
-        label,
+        element: el.tag,
+        inputType: staticAttr(el, "type"),
+        name: staticAttr(el, "name"),
+        id: staticAttr(el, "id"),
+        testId: tid,
+        label: staticAttr(el, "aria-label") ?? staticAttr(el, "placeholder"),
       })
     );
-  }
+  });
 
-  return { testIds, formFields };
+  return { testIds: Object.keys(testIdLines).sort(), testIdLines, formFields };
+}
+
+/** Per-<style>-block metadata. An unscoped, non-module block leaks selectors globally. */
+export function extractStyleBlocks(content: string): StyleBlockInfo[] {
+  const d = parseSfc(content).descriptor;
+  if (!d) return [];
+  return d.styles.map((s) => ({
+    line: s.loc.start.line,
+    ...(s.scoped ? { scoped: true } : {}),
+    ...(s.module ? { module: true } : {}),
+    ...(s.lang ? { lang: s.lang } : {}),
+    ...(/\bv-bind\(/.test(s.content) ? { hasVBind: true } : {}),
+  }));
+}
+
+/** Content of a <docs> custom block — the SFC's own documentation surface. */
+export function extractDocsBlock(content: string): string | undefined {
+  const docs = parseSfc(content).descriptor?.customBlocks.find((b) => b.type === "docs");
+  const text = docs?.content.trim();
+  return text ? text.slice(0, 500) : undefined;
 }
