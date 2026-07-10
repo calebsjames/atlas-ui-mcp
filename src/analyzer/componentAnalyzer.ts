@@ -22,6 +22,7 @@ import {
   extractDynamicComponentBindings,
 } from "./vueTemplate.js";
 import { extractVueEmits, extractEmitLiveness } from "./vueEmits.js";
+import { scriptAbsoluteLine } from "./sfcParser.js";
 import { analyzeVueTemplatePatterns } from "./templatePatterns.js";
 import {
   adapterMethodCallOf,
@@ -37,9 +38,9 @@ import { detectDataFetchingPattern } from "./dataFetching.js";
 
 /**
  * Component Analyzer - AST-Based
- * Uses TypeScript Compiler API for accurate code analysis instead of regex.
- * Vue <template> concerns live in the vueTemplate/vueEmits/templatePatterns
- * modules; layer-specific extras (hook/service/store/PHI) in layerAnalyzers.
+ * TypeScript Compiler API for script analysis; @vue/compiler-sfc for Vue
+ * <template> concerns, which live in the vueTemplate/vueEmits/templatePatterns
+ * modules. Layer-specific extras (hook/service/store/PHI) in layerAnalyzers.
  */
 export class ComponentAnalyzer {
   constructor(
@@ -96,6 +97,10 @@ export class ComponentAnalyzer {
     sourceFile: ts.SourceFile,
     rawContent: string
   ): void {
+    // analyzeWithAST saw only the extracted <script> content, so any line it
+    // found is relative to that block — map it back to the .vue file line.
+    if (base.line !== undefined) base.line = scriptAbsoluteLine(rawContent, base.line);
+
     const templateAnalysis = analyzeVueTemplate(rawContent);
     const dynamicChildren = this.extractDynamicMountedChildren(
       sourceFile,
@@ -141,7 +146,7 @@ export class ComponentAnalyzer {
     // Use full content for accessibility (includes <template>)
     base.accessibility = extractAccessibility(rawContent);
 
-    // Selectors live in the <template>, not the <script> AST — extract via regex.
+    // Selectors live in the <template>, not the <script> AST.
     const vueSelectors = extractVueTemplateSelectors(rawContent);
     if (vueSelectors.testIds.length) {
       base.testIds = [...new Set([...(base.testIds || []), ...vueSelectors.testIds])].sort();
