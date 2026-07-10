@@ -53,6 +53,8 @@ const FIXTURE: Component[] = [
     architectureLayer: "page",
     hooks: ["useUsers"],
     childComponents: ["UserCard"],
+    // UsersPage mounts UserCard only when a user is selected — the gatedBy case.
+    childComponentRendering: { UserCard: { vIf: "selectedUser" } },
     imports: [
       { type: "named", names: ["useUsers"], source: "@/hooks/useUsers", resolvedPath: "src/hooks/useUsers.ts" },
       { type: "default", names: ["UserCard"], source: "@/components/UserCard", resolvedPath: "src/components/UserCard.vue" },
@@ -182,4 +184,29 @@ test("narrowed maxDistance under-counts and says so", async () => {
   const risk = result.changedFiles[0].risk;
   assert.equal(risk?.blastRadius, 1); // only userService within distance 1
   assert.ok(result.notes.some((n) => n.includes("maxDistance=1")));
+});
+
+test("a gated mount surfaces as gatedBy, with a drive-the-guard note", async () => {
+  // UsersPage mounts UserCard only under v-if="selectedUser" (fixture), and it
+  // is UserCard's ONLY direct dependent — so the aggregate note must fire too.
+  const result = await run(["src/components/UserCard.vue"]);
+
+  const page = result.affectedItems.find((i) => i.name === "UsersPage");
+  assert.ok(page, "UsersPage must be affected by a UserCard change");
+  assert.equal(page.distance, 1);
+  assert.equal(page.gatedBy, "v-if: selectedUser");
+
+  assert.ok(
+    result.notes.some((n) => n.includes("only reached behind template guards")),
+    `expected a gating note, got ${JSON.stringify(result.notes)}`
+  );
+});
+
+test("non-render edges carry no gatedBy", async () => {
+  // userService imports the adapter (no template mount) — nothing is gated,
+  // and the aggregate note must not fire.
+  const result = await run(["src/adapters/userAdapter.ts"]);
+
+  assert.ok(result.affectedItems.every((i) => i.gatedBy === undefined));
+  assert.ok(!result.notes.some((n) => n.includes("template guards")));
 });

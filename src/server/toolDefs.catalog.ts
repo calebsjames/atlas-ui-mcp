@@ -271,7 +271,7 @@ export const CATALOG_TOOLS = [
   {
     name: "whats_affected",
     description:
-      "The edit→verify glue: given changed files (or auto-detected from git status when omitted), walk the dependency graph UPSTREAM to find every component/page affected by the change, map those to routes, and return concrete verification targets — ready-to-run check_page/render_component suggestions. Each changed file gets a risk classification (low/medium/high/critical with a scoring breakdown: layer, blast radius, routes reached, direct dependents) and the result carries an overallRisk; routes and suggested checks are ordered riskiest-first. Call it after editing to know exactly what to re-check in the browser and how carefully.",
+      "The edit→verify glue: given changed files (or auto-detected from git status when omitted), walk the dependency graph UPSTREAM to find every component/page affected by the change, map those to routes, and return concrete verification targets — ready-to-run check_page/render_component suggestions. Each changed file gets a risk classification (low/medium/high/critical with a scoring breakdown: layer, blast radius, routes reached, direct dependents) and the result carries an overallRisk; routes and suggested checks are ordered riskiest-first. Affected items carry gatedBy when they mount their dependency behind v-if/v-show/v-for (e.g. a modal) — drive that guard during verification or the change won't be exercised. Call it after editing to know exactly what to re-check in the browser and how carefully.",
     inputSchema: {
       type: "object",
       properties: {
