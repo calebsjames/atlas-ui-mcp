@@ -80,16 +80,17 @@ export function extractDynamicComponentBindings(fullContent: string): string[] {
 /** Child components rendered by the template, and the event names it binds. */
 export function analyzeVueTemplate(fullContent: string): {
   childComponents: string[];
+  childComponentLines: Record<string, number>;
   eventHandlers: string[];
 } {
   const { templateAst } = parseSfc(fullContent);
-  if (!templateAst) return { childComponents: [], eventHandlers: [] };
+  if (!templateAst) return { childComponents: [], childComponentLines: {}, eventHandlers: [] };
 
-  const childComponents = new Set<string>();
+  const childComponentLines: Record<string, number> = {};
   const eventHandlers = new Set<string>();
   walkElements(templateAst, (el) => {
     const name = namedChildComponent(el);
-    if (name) childComponents.add(name);
+    if (name && !(name in childComponentLines)) childComponentLines[name] = el.loc.start.line;
     // Same shape the regex produced: "click.self", "update:model-value".
     for (const ev of eventBindings(el)) {
       eventHandlers.add([ev.event, ...ev.modifiers].join("."));
@@ -97,7 +98,8 @@ export function analyzeVueTemplate(fullContent: string): {
   });
 
   return {
-    childComponents: Array.from(childComponents).sort(),
+    childComponents: Object.keys(childComponentLines).sort(),
+    childComponentLines,
     eventHandlers: Array.from(eventHandlers).sort(),
   };
 }
@@ -112,19 +114,19 @@ export function extractChildEventBindings(fullContent: string): ChildEventBindin
   const { templateAst } = parseSfc(fullContent);
   if (!templateAst) return [];
 
-  const byComponent = new Map<string, Set<string>>();
+  const byComponent = new Map<string, Record<string, number>>();
   walkElements(templateAst, (el) => {
     const name = namedChildComponent(el);
     if (!name) return;
     for (const ev of eventBindings(el)) {
-      const set = byComponent.get(name) ?? new Set<string>();
-      set.add(ev.event);
-      byComponent.set(name, set);
+      const lines = byComponent.get(name) ?? {};
+      if (!(ev.event in lines)) lines[ev.event] = ev.line;
+      byComponent.set(name, lines);
     }
   });
 
   return [...byComponent.entries()]
-    .map(([component, events]) => ({ component, events: [...events].sort() }))
+    .map(([component, lines]) => ({ component, events: Object.keys(lines).sort(), lines }))
     .sort((a, b) => a.component.localeCompare(b.component));
 }
 
@@ -136,16 +138,17 @@ export function extractChildEventBindings(fullContent: string): ChildEventBindin
  */
 export function extractVueTemplateSelectors(fullContent: string): {
   testIds: string[];
+  testIdLines: Record<string, number>;
   formFields: FormFieldInfo[];
 } {
   const { templateAst } = parseSfc(fullContent);
-  if (!templateAst) return { testIds: [], formFields: [] };
+  if (!templateAst) return { testIds: [], testIdLines: {}, formFields: [] };
 
-  const testIds = new Set<string>();
+  const testIdLines: Record<string, number> = {};
   const formFields: FormFieldInfo[] = [];
   walkElements(templateAst, (el) => {
     const tid = staticAttr(el, "data-testid");
-    if (tid) testIds.add(tid);
+    if (tid && !(tid in testIdLines)) testIdLines[tid] = el.loc.start.line;
 
     if (isComponentElement(el) || !FORM_CONTROL_TAGS.has(el.tag)) return;
     formFields.push(
@@ -160,5 +163,5 @@ export function extractVueTemplateSelectors(fullContent: string): {
     );
   });
 
-  return { testIds: Array.from(testIds).sort(), formFields };
+  return { testIds: Object.keys(testIdLines).sort(), testIdLines, formFields };
 }

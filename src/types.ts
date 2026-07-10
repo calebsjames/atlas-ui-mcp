@@ -169,12 +169,14 @@ export interface Component {
 
   // Epic 001 enhancements
   childComponents?: string[]; // PascalCase JSX elements rendered
+  childComponentLines?: Record<string, number>; // first usage line per child (template/JSX)
   eventHandlers?: string[]; // onClick, onSubmit, etc.
   imports?: ImportInfo[]; // Import statements
   dataFetchingPattern?: string; // "react-query" | "swr" | "useEffect-fetch" | etc.
 
   // Concrete selectors so agents can drive capture_flow without reading source
   testIds?: string[]; // data-testid attribute values
+  testIdLines?: Record<string, number>; // first usage line per data-testid value
   formFields?: FormFieldInfo[]; // form controls with usable selectors
 
   // Store layer (Pinia / Zustand / Redux Toolkit)
@@ -193,6 +195,9 @@ export interface Component {
   // the child never fires).
   childEventBindings?: ChildEventBinding[];
   templatePatterns?: TemplatePatterns; // overlay/teleport/z-index/header design signals
+  // Recoverable SFC syntax errors — analysis reflects the parser's recovery,
+  // so results for this file may be partial (capped list).
+  sfcParseErrors?: Array<{ message: string; line?: number }>;
 
   // Hook-specific metadata
   parameters?: string[]; // Function parameters for hooks
@@ -304,6 +309,7 @@ export interface ComponentProps {
 export interface ChildEventBinding {
   component: string; // child component tag (PascalCase as written in the template)
   events: string[]; // event names listened for, modifiers stripped (e.g. "status-updated")
+  lines?: Record<string, number>; // first 1-based file line of each event's binding
 }
 
 /** A modal/overlay/backdrop element detected in a template. */
@@ -364,10 +370,12 @@ export interface ComponentAnalysis {
   stateVariables?: string[];
   accessibility?: AccessibilityInfo;
   childComponents?: string[];
+  childComponentLines?: Record<string, number>;
   eventHandlers?: string[];
   imports?: ImportInfo[];
   dataFetchingPattern?: string;
   testIds?: string[];
+  testIdLines?: Record<string, number>;
   formFields?: FormFieldInfo[];
   storeCalls?: string[];
   storeName?: string;
@@ -378,6 +386,7 @@ export interface ComponentAnalysis {
   emitsDynamic?: boolean;
   childEventBindings?: ChildEventBinding[];
   templatePatterns?: TemplatePatterns;
+  sfcParseErrors?: Array<{ message: string; line?: number }>;
   vModelBindings?: string[];
   parameters?: string[];
   returnType?: string;

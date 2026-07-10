@@ -62,11 +62,13 @@ export async function findDanglingListeners(
       for (const event of binding.events) {
         const n = normalizeEvent(event);
         if (NATIVE_DOM_EVENTS.has(n) || firedNorm.has(n)) continue;
+        const line = binding.lines?.[event];
         dangling.push({
           parent: parent.name,
           parentPath: parent.relativePath,
           child: binding.component,
           event,
+          ...(line !== undefined ? { line } : {}),
           reason: declaredNorm.has(n)
             ? "child declares this event but never emits it (dead plumbing)"
             : "child neither declares nor emits this event (typo or renamed event?)",
@@ -95,6 +97,8 @@ export interface DanglingListener {
   parentPath: string;
   child: string;
   event: string;
+  /** 1-based line of the binding in the parent's template, when known. */
+  line?: number;
   reason: string;
 }
 

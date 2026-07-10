@@ -18,11 +18,18 @@ import type {
  * cost one real parse per file in the sequential per-file analysis flow.
  */
 
+export interface SfcParseError {
+  message: string;
+  line?: number;
+}
+
 export interface ParsedSfc {
   /** undefined only if parse() threw — it reports recoverable errors in-band. */
   descriptor: SFCDescriptor | undefined;
   /** undefined when there is no <template>, it isn't HTML (lang="pug"), or parse failed. */
   templateAst: RootNode | undefined;
+  /** Recoverable syntax errors — the descriptor/AST reflect the parser's recovery. */
+  errors: SfcParseError[];
 }
 
 let memoKey: string | undefined;
@@ -32,10 +39,17 @@ export function parseSfc(content: string): ParsedSfc {
   if (content === memoKey && memoValue) return memoValue;
   let result: ParsedSfc;
   try {
-    const { descriptor } = parse(content, { filename: "anonymous.vue", sourceMap: false });
-    result = { descriptor, templateAst: descriptor.template?.ast };
-  } catch {
-    result = { descriptor: undefined, templateAst: undefined };
+    const { descriptor, errors } = parse(content, { filename: "anonymous.vue", sourceMap: false });
+    result = {
+      descriptor,
+      templateAst: descriptor.template?.ast,
+      errors: errors.map((e) => ({
+        message: e.message,
+        ...("loc" in e && e.loc ? { line: e.loc.start.line } : {}),
+      })),
+    };
+  } catch (e) {
+    result = { descriptor: undefined, templateAst: undefined, errors: [{ message: String(e) }] };
   }
   memoKey = content;
   memoValue = result;
@@ -156,6 +170,8 @@ export interface TemplateEventBinding {
   modifiers: string[];
   /** Handler expression source; "" for a bare `@event` with no value. */
   expression: string;
+  /** 1-based file line of the `@event` directive itself. */
+  line: number;
 }
 
 /**
@@ -172,6 +188,7 @@ export function eventBindings(el: ElementNode): TemplateEventBinding[] {
       // Vue 3.4+ models modifiers as expression nodes; older versions as strings.
       modifiers: p.modifiers.map((m) => (typeof m === "string" ? m : m.content)),
       expression: p.exp ? expressionSource(p.exp).trim() : "",
+      line: p.loc.start.line,
     });
   }
   return out;

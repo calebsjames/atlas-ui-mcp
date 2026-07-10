@@ -9,7 +9,7 @@ import {
   extractVueTemplateSelectors,
 } from "./vueTemplate.js";
 import { analyzeVueTemplatePatterns } from "./templatePatterns.js";
-import { scriptAbsoluteLine } from "./sfcParser.js";
+import { parseSfc, scriptAbsoluteLine } from "./sfcParser.js";
 
 /**
  * Pins the behaviors the @vue/compiler-sfc migration fixed. Each case is a
@@ -37,13 +37,38 @@ test("event modifiers keep the regex-era shape", () => {
 
 // extractChildEventBindings truncated at the colon: @update:model-value → "update",
 // which could never match a child's declared "update:modelValue".
-test("child event bindings record full names, modifiers stripped", () => {
+test("child event bindings record full names with binding lines, modifiers stripped", () => {
   const bindings = extractChildEventBindings(
-    sfc(`<FormSelect @update:model-value="x" @select.once="y" />`)
+    sfc(`<FormSelect\n  @update:model-value="x"\n  @select.once="y"\n/>`)
   );
   assert.deepEqual(bindings, [
-    { component: "FormSelect", events: ["select", "update:model-value"] },
+    {
+      component: "FormSelect",
+      events: ["select", "update:model-value"],
+      lines: { "update:model-value": 3, select: 4 },
+    },
   ]);
+});
+
+test("child components and testids carry their first-usage line", () => {
+  const src = sfc(
+    `<div data-testid="panel">\n  <OrderCard />\n  <OrderCard data-testid="second" />\n</div>`
+  );
+  const { childComponentLines } = analyzeVueTemplate(src);
+  assert.deepEqual(childComponentLines, { OrderCard: 3 }); // first usage wins
+  const { testIdLines } = extractVueTemplateSelectors(src);
+  assert.deepEqual(testIdLines, { panel: 2, second: 4 });
+});
+
+// Recoverable syntax errors surface instead of being swallowed; the analysis
+// continues on the parser's recovery.
+test("SFC parse errors are reported with lines", () => {
+  const { errors, templateAst } = parseSfc(
+    `<template>\n  <div class="a" class="b" />\n</template>\n`
+  );
+  assert.ok(errors.length >= 1, "duplicate attribute must be reported");
+  assert.equal(errors[0].line, 2);
+  assert.ok(templateAst, "recovery still yields an AST");
 });
 
 // Commented-out markup produced phantom children, bindings, and form fields

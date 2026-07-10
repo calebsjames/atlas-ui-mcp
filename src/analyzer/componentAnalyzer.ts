@@ -22,7 +22,7 @@ import {
   extractDynamicComponentBindings,
 } from "./vueTemplate.js";
 import { extractVueEmits, extractEmitLiveness } from "./vueEmits.js";
-import { scriptAbsoluteLine } from "./sfcParser.js";
+import { parseSfc, scriptAbsoluteLine } from "./sfcParser.js";
 import { analyzeVueTemplatePatterns } from "./templatePatterns.js";
 import {
   adapterMethodCallOf,
@@ -35,6 +35,17 @@ import {
 import { checkPhiCompliance } from "./phiCompliance.js";
 import { extractAccessibility } from "./accessibility.js";
 import { detectDataFetchingPattern } from "./dataFetching.js";
+
+/** Map a script-relative line record back to .vue file lines (see scriptAbsoluteLine). */
+function mapLines(
+  lines: Record<string, number> | undefined,
+  rawContent: string
+): Record<string, number> | undefined {
+  if (!lines) return undefined;
+  return Object.fromEntries(
+    Object.entries(lines).map(([k, v]) => [k, scriptAbsoluteLine(rawContent, v)])
+  );
+}
 
 /**
  * Component Analyzer - AST-Based
@@ -100,6 +111,13 @@ export class ComponentAnalyzer {
     // analyzeWithAST saw only the extracted <script> content, so any line it
     // found is relative to that block — map it back to the .vue file line.
     if (base.line !== undefined) base.line = scriptAbsoluteLine(rawContent, base.line);
+    base.childComponentLines = mapLines(base.childComponentLines, rawContent);
+    base.testIdLines = mapLines(base.testIdLines, rawContent);
+
+    // Recoverable syntax errors mean the analysis below may be partial —
+    // surface them so a consumer can tell "clean file" from "parser recovery".
+    const parseErrors = parseSfc(rawContent).errors;
+    if (parseErrors.length) base.sfcParseErrors = parseErrors.slice(0, 5);
 
     const templateAnalysis = analyzeVueTemplate(rawContent);
     const dynamicChildren = this.extractDynamicMountedChildren(
@@ -114,6 +132,12 @@ export class ComponentAnalyzer {
         ...dynamicChildren,
       ]),
     ].sort();
+    if (Object.keys(templateAnalysis.childComponentLines).length || base.childComponentLines) {
+      base.childComponentLines = {
+        ...base.childComponentLines,
+        ...templateAnalysis.childComponentLines,
+      };
+    }
     base.eventHandlers = [...new Set([...(base.eventHandlers || []), ...templateAnalysis.eventHandlers])].sort();
 
     // Extract emits from defineEmits / Options API
@@ -150,6 +174,7 @@ export class ComponentAnalyzer {
     const vueSelectors = extractVueTemplateSelectors(rawContent);
     if (vueSelectors.testIds.length) {
       base.testIds = [...new Set([...(base.testIds || []), ...vueSelectors.testIds])].sort();
+      base.testIdLines = { ...base.testIdLines, ...vueSelectors.testIdLines };
     }
     if (vueSelectors.formFields.length) {
       base.formFields = dedupeFormFields([...(base.formFields || []), ...vueSelectors.formFields]);
@@ -194,9 +219,13 @@ export class ComponentAnalyzer {
     const hooks = new Set<string>();
     const stateVariables: string[] = [];
     const childComponents = new Set<string>();
+    const childComponentLines: Record<string, number> = {};
     const eventHandlers = new Set<string>();
     const imports: ImportInfo[] = [];
     const testIds = new Set<string>();
+    const testIdLines: Record<string, number> = {};
+    const lineOf = (node: ts.Node) =>
+      sourceFile.getLineAndCharacterOfPosition(node.getStart()).line + 1;
     const formFields: FormFieldInfo[] = [];
     const storeCalls = new Set<string>();
     const methodCalls = new Map<string, Set<string>>();
@@ -302,6 +331,7 @@ export class ComponentAnalyzer {
           : undefined;
         if (name && /^[A-Z]/.test(name) && !filteredJsxNames.has(name)) {
           childComponents.add(name);
+          if (!(name in childComponentLines)) childComponentLines[name] = lineOf(node);
         }
         // Lowercase intrinsic form controls → drivable selectors for capture_flow.
         if (ts.isIdentifier(tagName) && FORM_CONTROL_TAGS.has(tagName.text)) {
@@ -317,7 +347,10 @@ export class ComponentAnalyzer {
         }
         if (attrName === "data-testid") {
           const val = getJsxAttrStringValue(node);
-          if (val) testIds.add(val);
+          if (val) {
+            testIds.add(val);
+            if (!(val in testIdLines)) testIdLines[val] = lineOf(node);
+          }
         }
       }
 
@@ -346,9 +379,14 @@ export class ComponentAnalyzer {
       accessibility,
     };
 
+    if (Object.keys(childComponentLines).length) analysis.childComponentLines = childComponentLines;
+
     // Selector signals — omit entirely (not []) when nothing was found.
     const testIdList = Array.from(testIds).sort();
-    if (testIdList.length) analysis.testIds = testIdList;
+    if (testIdList.length) {
+      analysis.testIds = testIdList;
+      analysis.testIdLines = testIdLines;
+    }
 
     const dedupedFields = dedupeFormFields(formFields);
     if (dedupedFields.length) analysis.formFields = dedupedFields;
