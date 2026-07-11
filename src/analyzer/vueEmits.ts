@@ -32,14 +32,21 @@ export function extractVueEmits(sourceFile: ts.SourceFile): string[] {
       emits.push(`update:${modelNameOf(node)}`);
     }
     if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "defineEmits") {
-      // Pattern 1: defineEmits<{ (e: "name", val: T): void }>()
+      // Pattern 1: defineEmits<{ ... }>() — two type-literal member forms.
       if (node.typeArguments?.[0] && ts.isTypeLiteralNode(node.typeArguments[0])) {
         for (const member of node.typeArguments[0].members) {
-          // Call signature: (e: "name", ...): void
+          // 1a — legacy call-signature form: (e: "name", ...): void
           if (ts.isCallSignatureDeclaration(member) && member.parameters.length > 0) {
             const firstParam = member.parameters[0];
             if (firstParam.type && ts.isLiteralTypeNode(firstParam.type) && ts.isStringLiteral(firstParam.type.literal)) {
               emits.push(firstParam.type.literal.text);
+            }
+          }
+          // 1b — Vue 3.3+ shorthand: { name: [args]; "kebab-name": [args] },
+          // where each member is a PropertySignature keyed by the event name.
+          else if (ts.isPropertySignature(member) && member.name) {
+            if (ts.isIdentifier(member.name) || ts.isStringLiteral(member.name)) {
+              emits.push(member.name.text);
             }
           }
         }

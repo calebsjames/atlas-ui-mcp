@@ -17,6 +17,46 @@ import { ComponentAnalyzer } from "./componentAnalyzer.js";
 const parse = (code: string) =>
   ts.createSourceFile("Test.vue.ts", code, ts.ScriptTarget.Latest, true);
 
+test("defineEmits<{ ... }> shorthand form (Vue 3.3+) is extracted", () => {
+  // Property-signature members keyed by event name — incl. const-assigned and
+  // kebab-case string keys. Regression: this returned [] (only the legacy
+  // call-signature form was handled).
+  assert.deepEqual(
+    extractVueEmits(parse(
+      `const emit = defineEmits<{
+         reassign: [];
+         "delete-project": [];
+         "delivery-method-change": [method: string];
+       }>();`
+    )),
+    ["delete-project", "delivery-method-change", "reassign"]
+  );
+});
+
+test("defineEmits legacy call-signature form still works", () => {
+  assert.deepEqual(
+    extractVueEmits(parse(`const emit = defineEmits<{ (e: "close"): void; (e: "save", v: number): void }>();`)),
+    ["close", "save"]
+  );
+});
+
+test("shorthand-declared emits fire from template call sites, not reported dead", () => {
+  const sfc = `<template>
+  <Child @reassign="emit('reassign')" @delete-project="emit('delete-project')" />
+</template>
+<script setup lang="ts">
+const emit = defineEmits<{ reassign: []; "delete-project": [] }>();
+</script>`;
+  const declared = extractVueEmits(parse(`const emit = defineEmits<{ reassign: []; "delete-project": [] }>();`));
+  const live = extractEmitLiveness(
+    ts.createSourceFile("Test.vue.ts", `const emit = defineEmits<{ reassign: []; "delete-project": [] }>();`, ts.ScriptTarget.Latest, true),
+    sfc,
+    declared
+  );
+  assert.deepEqual(live.fired, ["delete-project", "reassign"]);
+  assert.deepEqual(live.dead, []);
+});
+
 test("defineModel declares its implicit update emit", () => {
   assert.deepEqual(
     extractVueEmits(parse(`const model = defineModel<string>();`)),
