@@ -11,7 +11,7 @@ export const CATALOG_TOOLS = [
   {
     name: "list_all_components",
     description:
-      "List the codebase catalog as compact summaries: { totalCount, lastScanned, byLayer, components } where each entry has name, architecture layer, category, relative path, and description/routePath when present. byLayer counts cover the whole catalog; `layer` filters the components list. Pass verbose:true for full metadata objects (large). Follow up with get_component_detail for one item's full data.",
+      "List the codebase catalog as compact summaries: { totalCount, lastScanned, byLayer, components } where each entry has name, architecture layer, category, relative path, and description/routePath when present. byLayer counts cover the whole catalog; `layer` filters the components list. Pass verbose:true for full metadata objects (large). Follow up with get_component_detail for one item's full data. If a coverageWarning field is present, the scan targets missed most of the app's UI files — read it and fix .atlas-ui.json scanTargets before trusting the catalog.",
     inputSchema: {
       type: "object",
       properties: {
@@ -135,7 +135,7 @@ export const CATALOG_TOOLS = [
   {
     name: "get_architecture_overview",
     description:
-      "Get a high-level overview of the entire application architecture. Returns counts by layer (components, pages, hooks, services, adapters, contexts), category breakdown, data flow chains (page -> hook -> service), and route map.",
+      "Get a high-level overview of the entire application architecture. Returns counts by layer (components, pages, hooks, services, adapters, contexts), category breakdown, data flow chains (page -> hook -> service), and route map. If a coverageWarning field is present, the scan targets missed most of the app's UI files — read it and fix .atlas-ui.json scanTargets before trusting the catalog.",
     inputSchema: {
       type: "object",
       properties: {},

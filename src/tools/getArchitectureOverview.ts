@@ -1,7 +1,7 @@
 import type { ComponentScanner } from "../scanner/componentScanner.js";
 import type { CacheManager } from "../cache/cacheManager.js";
 import type { RouteAnalyzer } from "../analyzer/routeAnalyzer.js";
-import type { ArchitectureLayer } from "../types.js";
+import type { ArchitectureLayer, ScanCoverageWarning } from "../types.js";
 import { countByLayer, ensureCatalog } from "./shared.js";
 
 export interface ArchitectureOverview {
@@ -24,6 +24,8 @@ export interface ArchitectureOverview {
   dataFlowChains: string[];
   /** Only present when PHI compliance scanning is enabled (config-gated). */
   phiViolationCount?: number;
+  /** Only present when the scan likely missed most of the app's UI files. */
+  coverageWarning?: ScanCoverageWarning;
   routes: { path: string; component: string; isProtected: boolean }[];
 }
 
@@ -110,6 +112,7 @@ export async function getArchitectureOverview(
     },
     dataFlowChains: [...new Set(dataFlowChains)].slice(0, 30),
     ...(hasPhiData ? { phiViolationCount } : {}),
+    ...(catalog.coverageWarning ? { coverageWarning: catalog.coverageWarning } : {}),
     routes: routes.map((r) => ({
       path: r.path,
       component: r.component,

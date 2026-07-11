@@ -11,6 +11,7 @@ import type {
   ProjectConfig,
 } from "../types.js";
 import { DEFAULT_SCAN_TARGETS } from "../config/configLoader.js";
+import { computeCoverageWarning } from "./coverage.js";
 import { matchesExclude } from "../util.js";
 
 /**
@@ -23,6 +24,7 @@ export class ComponentScanner {
   private scanTargets: ScanTarget[];
   private analyzer: ComponentAnalyzer;
   private excludePatterns: string[];
+  private routeFiles: string[];
 
   constructor(workspaceRoot: string, config?: ProjectConfig) {
     this.workspaceRoot = workspaceRoot;
@@ -31,6 +33,7 @@ export class ComponentScanner {
     this.excludePatterns = config?.exclude || [
       "node_modules", "dist", "build", "__tests__", "*.test.*", "*.spec.*",
     ];
+    this.routeFiles = config?.routeFiles || [];
   }
 
   /**
@@ -88,11 +91,22 @@ export class ComponentScanner {
       );
     }
 
+    const coverageWarning = await computeCoverageWarning({
+      workspaceRoot: this.workspaceRoot,
+      scanTargets: this.scanTargets,
+      excludePatterns: this.excludePatterns,
+      extraCoveredFiles: [...ComponentScanner.ROOT_ENTRY_FILES, ...this.routeFiles],
+      scannedUiFileCount: allComponents.filter((c) =>
+        /\.(tsx|jsx|vue)$/.test(c.relativePath)
+      ).length,
+    });
+
     return {
       components: allComponents,
       categories,
       totalCount: allComponents.length,
       lastScanned: Date.now(),
+      ...(coverageWarning ? { coverageWarning } : {}),
     };
   }
 

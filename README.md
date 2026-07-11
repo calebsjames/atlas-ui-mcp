@@ -130,7 +130,15 @@ Drop a `.atlas-ui.json` in your project root to customize scanning. If you don't
 
 **React** — scans `src/components` (.tsx), `src/pages` (.tsx), `src/hooks` (.ts/.tsx), `src/services` (.ts), `src/adapters` (.ts), `src/contexts` (.tsx), `src/stores` + `src/store` (.ts). Routes from `src/App.tsx`, plus Next.js `app/`/`pages/` file routes when `next` is a dependency.
 
+**Next.js** (when `next` is a dependency) — the React defaults widen to the layouts Next sanctions: shared code colocated inside the App Router dir (`app/`- and `src/app/`-nested `components`, `hooks`, `contexts`, `providers`, `services`, `lib`, `stores`), the `src`-level `src/lib` + `src/providers`, and root-level dirs next to `app/` or `pages/` (`components`, `hooks`, `lib`, `pages`, ...). Directories that don't exist are skipped, so this costs nothing on plain `src/*` layouts.
+
 **Vue** — scans `src/components` (.vue), `src/views` + `src/pages` (.vue), `src/composables` (.ts), `src/services` (.ts), `src/adapters` (.ts), `src/stores` + `src/store` (.ts). Routes from `src/router/index.ts`, plus Nuxt `pages/` file routes when `nuxt` is a dependency.
+
+**Nuxt** (when `nuxt` is a dependency) — the Vue defaults widen to Nuxt's root-level dirs (`components`, `layouts`, `pages`, `composables`, `stores`, `utils`) and their Nuxt 4 `app/`-nested equivalents.
+
+### Scan coverage warning
+
+Layout conventions are unbounded, so no default list can cover them all — but a scan that misses the app should say so instead of returning a near-empty catalog that reads as "this app has no components". After every scan, the server checks for UI source files (`.tsx`/`.jsx`/`.vue`) that no scan target covers. When the misses outweigh the catalog (or the catalog is empty), `list_all_components` and `get_architecture_overview` include a `coverageWarning` naming the heaviest uncovered directories, so the fix is a copy-paste `scanTargets` entry in `.atlas-ui.json`. Files owned by file-based routing (Next App Router special files, `pages/` routes) don't count as missed.
 
 ## Tools
 

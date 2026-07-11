@@ -1,6 +1,6 @@
 import type { ComponentScanner } from "../scanner/componentScanner.js";
 import type { CacheManager } from "../cache/cacheManager.js";
-import type { ArchitectureLayer, Component } from "../types.js";
+import type { ArchitectureLayer, Component, ScanCoverageWarning } from "../types.js";
 import { countByLayer, ensureCatalog, toSummary, type CatalogItemSummary } from "./shared.js";
 
 export interface ListAllComponentsResult {
@@ -8,6 +8,8 @@ export interface ListAllComponentsResult {
   lastScanned: number;
   byLayer: Record<string, number>;
   components: CatalogItemSummary[] | Component[];
+  /** Only present when the scan likely missed most of the app's UI files. */
+  coverageWarning?: ScanCoverageWarning;
 }
 
 /**
@@ -38,5 +40,6 @@ export async function listAllComponents(
     lastScanned: catalog.lastScanned,
     byLayer,
     components,
+    ...(catalog.coverageWarning ? { coverageWarning: catalog.coverageWarning } : {}),
   };
 }

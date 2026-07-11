@@ -291,6 +291,24 @@ export interface DeadCodeEntry {
 }
 
 /**
+ * Emitted when a scan finds substantially fewer UI files than exist in the
+ * workspace — the project's layout doesn't match the scan targets, so the
+ * catalog is silently missing most of the app. Points at where the files
+ * actually live so the fix (a .atlas-ui.json scanTargets entry) is one step
+ * away instead of reading as "this app has no components".
+ */
+export interface ScanCoverageWarning {
+  /** UI source files (.tsx/.jsx/.vue) not covered by any scan target. */
+  missedFileCount: number;
+  /** UI source files the scan did catalog, for scale. */
+  scannedUiFileCount: number;
+  /** Directories holding uncovered files, heaviest first (top 8). */
+  uncoveredDirs: { dir: string; count: number }[];
+  /** Human-readable summary with the suggested fix. */
+  message: string;
+}
+
+/**
  * Component catalog organized by category
  */
 export interface ComponentCatalog {
@@ -299,6 +317,8 @@ export interface ComponentCatalog {
   totalCount: number;
   lastScanned: number;
   routes?: RouteEntry[];
+  /** Only present when the scan likely missed most of the app's UI files. */
+  coverageWarning?: ScanCoverageWarning;
 }
 
 /**
