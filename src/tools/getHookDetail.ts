@@ -20,6 +20,10 @@ export interface HookDetail {
   hooks: string[];
   queryKeys?: string[];
   adapterCalls?: string[];
+  /** Endpoints the hook issues directly (colocated `api.get('/x')`), if any. */
+  apiEndpoints?: string[];
+  /** Those endpoints attributed to the hook's exported function that owns them. */
+  endpointsByMethod?: Record<string, string[]>;
   dataFetchingPattern?: string;
   imports: { source: string; names: string[] }[];
   phiCompliance?: {
@@ -84,6 +88,8 @@ export async function getHookDetail(
     hooks: hook.hooks || [],
     queryKeys: hook.queryKeys,
     adapterCalls: hook.adapterCalls,
+    apiEndpoints: hook.apiEndpoints,
+    endpointsByMethod: hook.endpointsByMethod,
     dataFetchingPattern: hook.dataFetchingPattern,
     imports: (hook.imports || []).map((imp) => ({
       source: imp.source,

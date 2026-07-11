@@ -246,6 +246,43 @@ export function analyzeServiceOrAdapter(
 }
 
 /**
+ * Endpoints a file issues directly, attributed to the enclosing exported
+ * function (so `get_data_flow` can scope by the method a caller invokes). Used
+ * for layers that fetch outside the service/adapter tier — notably query hooks
+ * that colocate `api.get('/x')` with the hook. `wrapperHeuristic` stays OFF here:
+ * only unambiguous `client.get()` / `fetch()` calls count, never a path-shaped
+ * arg to an arbitrary call (which in hook/component code is usually routing).
+ */
+export function extractEndpoints(
+  sourceFile: ts.SourceFile,
+  wrapperHeuristic: boolean
+): Pick<ComponentAnalysis, "apiEndpoints" | "endpointsByMethod"> {
+  const endpoints: string[] = [];
+  const endpointsByMethod = new Map<string, Set<string>>();
+  const fnStack: string[] = [];
+
+  const visit = (node: ts.Node) => {
+    const fnName = declaredFunctionName(node);
+    if (fnName) fnStack.push(fnName);
+    if (ts.isCallExpression(node)) {
+      const found = extractEndpointsFromCall(node, sourceFile, wrapperHeuristic);
+      endpoints.push(...found);
+      const owner = fnStack[fnStack.length - 1];
+      if (owner) for (const e of found) addToSetMap(endpointsByMethod, owner, e);
+    }
+    ts.forEachChild(node, visit);
+    if (fnName) fnStack.pop();
+  };
+  visit(sourceFile);
+
+  const result: Pick<ComponentAnalysis, "apiEndpoints" | "endpointsByMethod"> = {};
+  if (endpoints.length > 0) result.apiEndpoints = [...new Set(endpoints)];
+  const byMethod = setMapToRecord(endpointsByMethod);
+  if (byMethod) result.endpointsByMethod = byMethod;
+  return result;
+}
+
+/**
  * Pull endpoint(s) from a single call expression. Handles three shapes:
  *   1. HTTP client verb — `client.get("/x")`            → "GET /x"
  *   2. `fetch("/x")` / `fetch(\`${base}/x\`)`           → "/x"
@@ -258,7 +295,8 @@ export function analyzeServiceOrAdapter(
  */
 function extractEndpointsFromCall(
   node: ts.CallExpression,
-  sourceFile: ts.SourceFile
+  sourceFile: ts.SourceFile,
+  allowWrapper = true
 ): string[] {
   // 1. Standard client verb: x.get(...) / x.post(...)
   if (ts.isPropertyAccessExpression(node.expression)) {
@@ -277,6 +315,36 @@ function extractEndpointsFromCall(
     return path ? [path] : [];
   }
 
+  // (3) and (4) are greedy and only safe in service/adapter files; off them, a
+  // hook/component's `navigate('/x')` or a route object `{path, component}`
+  // would be misread as a request.
+  if (!allowWrapper) return [];
+  const out: string[] = [];
+
+  // 4. Config-object call — `request({ path: '/x', method: 'GET' })`. The shape
+  //    generated clients (swagger-codegen, orval) and typed fetch wrappers use,
+  //    where the path/method live inside an options object, not as bare args.
+  for (const arg of node.arguments) {
+    if (!ts.isObjectLiteralExpression(arg)) continue;
+    let objPath: string | undefined;
+    let objMethod: string | undefined;
+    for (const prop of arg.properties) {
+      if (!ts.isPropertyAssignment(prop) || !ts.isIdentifier(prop.name)) continue;
+      const key = prop.name.text.toLowerCase();
+      if (key === "path" || key === "url" || key === "endpoint") {
+        const t = getEndpointText(prop.initializer, sourceFile);
+        if (t && looksLikeApiPath(t)) objPath = t;
+      } else if (
+        key === "method" &&
+        ts.isStringLiteral(prop.initializer) &&
+        HTTP_METHODS.has(prop.initializer.text.toUpperCase())
+      ) {
+        objMethod = prop.initializer.text.toUpperCase();
+      }
+    }
+    if (objPath) out.push(objMethod ? `${objMethod} ${objPath}` : objPath);
+  }
+
   // 3. Custom wrapper — scan args for an API-path-shaped string, plus a method literal.
   let method: string | undefined;
   for (const arg of node.arguments) {
@@ -285,7 +353,6 @@ function extractEndpointsFromCall(
       break;
     }
   }
-  const out: string[] = [];
   for (const arg of node.arguments) {
     const text = getEndpointText(arg, sourceFile);
     if (text && looksLikeApiPath(text)) {

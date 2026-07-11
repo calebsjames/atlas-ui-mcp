@@ -231,6 +231,11 @@ export interface Component {
 
   // File alias (when defineComponent name differs from filename)
   fileAlias?: string;
+
+  // Every exported symbol name of this module. Indexed as secondary name
+  // lookups so a non-primary export (e.g. `useLogin` from an auth module whose
+  // primary is `AuthLoader`) is still reachable by name.
+  exportedNames?: string[];
 }
 
 /**
@@ -251,6 +256,13 @@ export interface PhiComplianceInfo {
 export interface RouteEntry {
   path: string;
   component: string;
+  /**
+   * Workspace-relative, extensionless module path of the routed component when
+   * it was given as a lazy import (`lazy: () => import('./routes/x')`) rather
+   * than an inline element. Lets the route map resolve the page by FILE even
+   * when no component name is statically recoverable from the route object.
+   */
+  componentPath?: string;
   isProtected: boolean;
   /**
    * How `isProtected` was determined:

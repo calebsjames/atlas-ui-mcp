@@ -1,6 +1,8 @@
 import fs from "fs/promises";
 import path from "path";
+import ts from "typescript";
 import { ComponentAnalyzer } from "../analyzer/componentAnalyzer.js";
+import { analyzeModuleExports } from "../analyzer/exportAnalyzer.js";
 import type {
   Component,
   ComponentCatalog,
@@ -138,7 +140,9 @@ export class ComponentScanner {
       const category = parentCategory || this.determineCategory(fullPath, target);
       const relativePath = path.relative(this.workspaceRoot, fullPath);
       const fileBaseName = entry.name.replace(/\.(vue|tsx?|jsx?)$/, "");
-      const componentName = this.extractExportedName(content, fileBaseName) || fileBaseName;
+      const { name: componentName, exportedNames } = this.resolveComponentName(
+        content, fileBaseName, entry.name, target.type
+      );
 
       // Classify by content, not just directory: a use*-named .ts module living
       // under a components/ tree is a composable/hook, not a component.
@@ -167,6 +171,7 @@ export class ComponentScanner {
       if (componentName !== fileBaseName && fileBaseName !== componentName) {
         (component as any).fileAlias = fileBaseName;
       }
+      if (exportedNames.length > 0) component.exportedNames = exportedNames;
 
       components.push(component);
     }
@@ -198,7 +203,9 @@ export class ComponentScanner {
       }
 
       const fileBaseName = path.basename(rel).replace(/\.(vue|tsx?|jsx?)$/, "");
-      const componentName = this.extractExportedName(content, fileBaseName) || fileBaseName;
+      const { name: componentName, exportedNames } = this.resolveComponentName(
+        content, fileBaseName, path.basename(rel), "root"
+      );
       const analysis = await this.analyzer.analyzeComponent(fullPath, componentName, "root");
 
       const component: Component = {
@@ -213,6 +220,7 @@ export class ComponentScanner {
       if (componentName !== fileBaseName) {
         component.fileAlias = fileBaseName;
       }
+      if (exportedNames.length > 0) component.exportedNames = exportedNames;
       rootComponents.push(component);
     }
 
@@ -224,6 +232,33 @@ export class ComponentScanner {
    */
   private isExcluded(name: string): boolean {
     return matchesExclude(name, this.excludePatterns);
+  }
+
+  /**
+   * Resolve the catalog name for a file. TS/JS modules go through the AST
+   * resolver (handles `export {X}`, `export default Ident`, destructured
+   * exports, and prefers the default export). Vue SFCs stay on the regex path —
+   * their mixed template/script blocks don't parse as a TS module. Falls back to
+   * the regex extractor, then the filename.
+   */
+  private resolveComponentName(
+    content: string,
+    fileBaseName: string,
+    fileName: string,
+    layerHint: string
+  ): { name: string; exportedNames: string[] } {
+    if (!fileName.endsWith(".vue")) {
+      try {
+        const sf = ts.createSourceFile(
+          fileName, content, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX
+        );
+        const { primary, names } = analyzeModuleExports(sf, fileBaseName, layerHint);
+        if (primary) return { name: primary, exportedNames: names };
+      } catch {
+        // Unparseable — fall through to the regex extractor.
+      }
+    }
+    return { name: this.extractExportedName(content, fileBaseName) || fileBaseName, exportedNames: [] };
   }
 
   /**

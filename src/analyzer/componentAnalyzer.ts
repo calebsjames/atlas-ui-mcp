@@ -31,6 +31,7 @@ import {
   addToSetMap,
   analyzeHook,
   analyzeServiceOrAdapter,
+  extractEndpoints,
   extractStoreName,
   setMapToRecord,
 } from "./layerAnalyzers.js";
@@ -206,6 +207,12 @@ export class ComponentAnalyzer {
   ): void {
     if (layer === "hook") {
       Object.assign(base, analyzeHook(sourceFile));
+      // Query hooks that colocate the fetch (`api.get('/x')` inside the hook
+      // file) expose endpoints too. Extract the unambiguous HTTP calls only —
+      // the wrapper heuristic is off so router calls aren't mistaken for requests.
+      const ep = extractEndpoints(sourceFile, false);
+      if (ep.apiEndpoints) base.apiEndpoints = ep.apiEndpoints;
+      if (ep.endpointsByMethod) base.endpointsByMethod = ep.endpointsByMethod;
     } else if (layer === "service" || layer === "adapter") {
       Object.assign(base, analyzeServiceOrAdapter(sourceFile, content));
     } else if (layer === "store") {

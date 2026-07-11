@@ -3,7 +3,6 @@ import type { CacheManager } from "../cache/cacheManager.js";
 import type { AmbiguousMatch, ArchitectureLayer, Component } from "../types.js";
 import {
   ensureCatalog,
-  collectUnique,
   isAmbiguousMatch,
   nameNotFound,
   resolveByName,
@@ -50,90 +49,94 @@ export async function getDependencyChain(
     architectureLayer: target.architectureLayer,
   };
 
-  const dependsOn = collectDownstreamRecursive(target, cache, depth, new Set([target.name.toLowerCase()]));
-  const usedBy = collectUpstreamRecursive(target, cache, depth, new Set([target.name.toLowerCase()]));
+  const dependsOn = collectDownstreamRecursive(target, cache, depth, new Set([target.relativePath]));
+  const usedBy = collectUpstreamRecursive(target, cache, depth, new Set([target.relativePath]));
 
   return { target: targetNode, dependsOn, usedBy };
 }
 
+/**
+ * What this item depends on: the catalog nodes its imports resolve to BY FILE,
+ * plus any rendered child that isn't one of those imports (globally-registered
+ * or same-file components, which have no import to resolve). Path-based import
+ * resolution is what stops a same-named type/library/component from being
+ * pulled in as a phantom dependency. Cycles are bounded by `seen` (keyed by
+ * file path, so two files sharing a name don't collapse into one).
+ */
 function collectDownstreamRecursive(
-  target: Component | { imports?: { names: string[] }[]; childComponents?: string[] },
+  target: Component | { imports?: { names: string[]; resolvedPath?: string }[]; childComponents?: string[] },
   cache: CacheManager,
   depth: number,
   seen: Set<string>
 ): DependencyNode[] {
+  const deps = new Map<string, Component>();
+
+  const importedNames = new Set<string>();
+  for (const imp of target.imports || []) {
+    for (const name of imp.names) importedNames.add(name.toLowerCase());
+    for (const node of cache.resolveImportedNodes(imp)) deps.set(node.relativePath, node);
+  }
+  // A rendered child that wasn't imported can only be matched by name (best
+  // effort). Skip children that ARE imports — those were resolved by path
+  // above, so name-matching them would only risk re-adding a wrong same-name node.
+  for (const child of target.childComponents || []) {
+    if (importedNames.has(child.toLowerCase())) continue;
+    for (const node of cache.getByName(child)) deps.set(node.relativePath, node);
+  }
+
   const result: DependencyNode[] = [];
-
-  const names: string[] = [];
-  if (target.imports) {
-    for (const imp of target.imports) {
-      names.push(...imp.names);
+  for (const dep of deps.values()) {
+    if (seen.has(dep.relativePath)) continue;
+    seen.add(dep.relativePath);
+    const node: DependencyNode = {
+      name: dep.name,
+      relativePath: dep.relativePath,
+      architectureLayer: dep.architectureLayer,
+    };
+    if (depth > 1) {
+      const children = collectDownstreamRecursive(dep, cache, depth - 1, seen);
+      if (children.length > 0) node.dependsOn = children;
     }
-  }
-  if (target.childComponents) {
-    names.push(...target.childComponents);
-  }
-
-  for (const name of names) {
-    if (seen.has(name.toLowerCase())) continue;
-    const deps = cache.getByName(name);
-    for (const dep of deps) {
-      seen.add(dep.name.toLowerCase());
-      const node: DependencyNode = {
-        name: dep.name,
-        relativePath: dep.relativePath,
-        architectureLayer: dep.architectureLayer,
-      };
-      if (depth > 1) {
-        const children = collectDownstreamRecursive(dep, cache, depth - 1, seen);
-        if (children.length > 0) {
-          node.dependsOn = children;
-        }
-      }
-      result.push(node);
-    }
+    result.push(node);
   }
 
   return result;
 }
 
+/**
+ * What uses this item: everything that imports its FILE (catches named-export
+ * imports the name index would miss, and never matches a same-named import from
+ * a different module) plus everything that renders it as a JSX child (inherently
+ * name-based). Deduped by file path.
+ */
 function collectUpstreamRecursive(
   target: Component,
   cache: CacheManager,
   depth: number,
   seen: Set<string>
 ): DependencyNode[] {
-  const importers = cache.getImportersOf(target.name);
-  const renderers = cache.getRenderersOf(target.name);
-  // Also check fileAlias for upstream lookups
+  const uppers = new Map<string, Component>();
+  for (const c of cache.getImportersOfFile(target.relativePath)) uppers.set(c.relativePath, c);
+  for (const c of cache.getRenderersOf(target.name)) uppers.set(c.relativePath, c);
   if (target.fileAlias) {
-    importers.push(...cache.getImportersOf(target.fileAlias));
-    renderers.push(...cache.getRenderersOf(target.fileAlias));
+    for (const c of cache.getRenderersOf(target.fileAlias)) uppers.set(c.relativePath, c);
   }
+  uppers.delete(target.relativePath);
 
-  const uniqueItems = collectUnique([...importers, ...renderers], target.name);
   const result: DependencyNode[] = [];
-
-  for (const item of uniqueItems) {
-    if (seen.has(item.name.toLowerCase())) continue;
-    seen.add(item.name.toLowerCase());
+  for (const item of uppers.values()) {
+    if (seen.has(item.relativePath)) continue;
+    seen.add(item.relativePath);
 
     const node: DependencyNode = {
       name: item.name,
       relativePath: item.relativePath,
       architectureLayer: item.architectureLayer as ArchitectureLayer,
     };
-
     if (depth > 1) {
-      const catalogItem = cache.getByName(item.name)[0];
-      if (catalogItem) {
-        const parents = collectUpstreamRecursive(catalogItem, cache, depth - 1, seen);
-        if (parents.length > 0) {
-          node.usedBy = parents;
-        }
-      }
+      const parents = collectUpstreamRecursive(item, cache, depth - 1, seen);
+      if (parents.length > 0) node.usedBy = parents;
     }
-
     result.push(node);
   }
 

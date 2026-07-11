@@ -221,14 +221,19 @@ function traceComponentLocal(
     }
 
     const serviceTrace = traceFromServiceCalls(composable, catalog, cache);
-    if (serviceTrace) {
+    // A hook/composable can fetch directly (its OWN apiEndpoints — the colocated
+    // `api.get('/x')` pattern) and/or delegate to a service. Surface both, the
+    // same way a store's own endpoints are counted below.
+    const ownEndpoints = composable.apiEndpoints || [];
+    if (serviceTrace || ownEndpoints.length > 0) {
+      const endpoints = [...new Set([...ownEndpoints, ...(serviceTrace?.endpoints || [])])];
       chains.push({
         component: toStep(component),
-        composables: [toStep(composable, composable.adapterCalls)],
+        composables: [toStep(composable, composable.adapterCalls, ownEndpoints)],
         stores: [],
-        services: serviceTrace.services,
-        adapters: serviceTrace.adapters,
-        endpoints: serviceTrace.endpoints,
+        services: serviceTrace?.services || [],
+        adapters: serviceTrace?.adapters || [],
+        endpoints,
       });
     }
   }
@@ -303,18 +308,23 @@ function traceFromServiceCalls(
     pushUniqueStep(services, toStep(service));
 
     // Which service methods does the SOURCE actually call? Known for hooks and
-    // stores (the analyzer records method-level calls there); components fall
-    // back to the service's whole surface.
+    // stores (the analyzer records method-level calls there). Components lack
+    // that attribution, so fall back to the imported call name itself (often the
+    // method, e.g. `import { getArticles }`), then to the service's whole
+    // surface — a safe over-approximation, since verify_data_flow only flags
+    // UNEXPECTED observed calls, so predicting extra endpoints never misfires.
     const calledServiceMethods =
       source.methodCalls?.[serviceName] ?? source.methodCalls?.[service.name];
-
-    // A service can fetch directly (no adapter hop) — count its own endpoints
-    // for the called methods, where attribution exists.
-    if (calledServiceMethods?.length && service.endpointsByMethod) {
-      for (const method of calledServiceMethods) {
-        endpoints.push(...(service.endpointsByMethod[method] || []));
+    const methodKeys = calledServiceMethods?.length ? calledServiceMethods : [serviceName];
+    let matched = 0;
+    if (service.endpointsByMethod) {
+      for (const method of methodKeys) {
+        const eps = service.endpointsByMethod[method] || [];
+        endpoints.push(...eps);
+        matched += eps.length;
       }
     }
+    if (matched === 0) endpoints.push(...(service.apiEndpoints || []));
 
     const adapterMethods = delegatedAdapterMethods(service, calledServiceMethods);
 

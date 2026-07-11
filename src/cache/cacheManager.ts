@@ -20,6 +20,15 @@ export class CacheManager {
   // importers even when they import a named export (e.g. `updateClockOffset`
   // from useTokenRefreshTimer) rather than the module's own name.
   private fileImportIndex: Map<string, Component[]> = new Map();
+  // Keyed by the component's own module PATH (workspace-relative, extensionless)
+  // — resolves a dependency edge to the FILE it points at, so a same-named type,
+  // library export, or unrelated component can't masquerade as the target.
+  private pathIndex: Map<string, Component[]> = new Map();
+  // Keyed by EVERY exported symbol name (not just the node's primary name) —
+  // consulted only when the primary name index misses, so a non-first export
+  // (e.g. `useLogin`) is reachable without shadowing a real component that owns
+  // that name as its primary.
+  private exportIndex: Map<string, Component[]> = new Map();
 
   /**
    * Get cached catalog
@@ -48,7 +57,12 @@ export class CacheManager {
    * O(1) lookup by component name (case-insensitive)
    */
   getByName(name: string): Component[] {
-    return this.nameIndex.get(name.toLowerCase()) || [];
+    const key = name.toLowerCase();
+    const primary = this.nameIndex.get(key);
+    // Primary (node name / fileAlias) wins; secondary exports are a fallback so
+    // they never shadow a component that owns the name as its primary.
+    if (primary && primary.length > 0) return primary;
+    return this.exportIndex.get(key) || [];
   }
 
   /**
@@ -82,8 +96,50 @@ export class CacheManager {
     return direct;
   }
 
+  /**
+   * O(1) lookup: catalog nodes whose own file IS the given module path
+   * (workspace-relative, extension optional). A directory import (`@/x`) also
+   * matches that directory's `index.*` barrel.
+   */
+  getByPath(relativePath: string): Component[] {
+    const key = CacheManager.normalizeModulePath(relativePath);
+    return [
+      ...(this.pathIndex.get(key) || []),
+      ...(this.pathIndex.get(`${key}/index`) || []),
+    ];
+  }
+
+  /**
+   * Resolve one import statement to the catalog nodes it actually points at,
+   * by FILE — never by bare name. This is what keeps `import { Discussion }`
+   * (a type) or `import { ErrorBoundary } from 'react-error-boundary'` (a
+   * library) from being mistaken for a same-named page/component.
+   *
+   *   1. Exact file match on the resolved path (covers direct + `index` imports).
+   *   2. Barrel fallback: when the path is a directory that re-exports (so no
+   *      node sits exactly on it), accept a node INSIDE that directory whose
+   *      name is one of the imported symbols — e.g. `@/components/ui/button`
+   *      re-exporting `Button` from `button/button.tsx`.
+   *   3. External imports (no resolvedPath) resolve to nothing.
+   */
+  resolveImportedNodes(imp: { names: string[]; resolvedPath?: string }): Component[] {
+    if (!imp.resolvedPath) return [];
+    const exact = this.getByPath(imp.resolvedPath);
+    if (exact.length) return exact;
+
+    const dirKey = CacheManager.normalizeModulePath(imp.resolvedPath);
+    const out = new Map<string, Component>();
+    for (const name of imp.names) {
+      for (const c of this.getByName(name)) {
+        const k = CacheManager.normalizeModulePath(c.relativePath);
+        if (k === dirKey || k.startsWith(`${dirKey}/`)) out.set(c.relativePath, c);
+      }
+    }
+    return [...out.values()];
+  }
+
   /** Forward slashes, no extension — the canonical key for module-path lookups. */
-  private static normalizeModulePath(p: string): string {
+  static normalizeModulePath(p: string): string {
     return p
       .split("\\")
       .join("/")
@@ -132,6 +188,8 @@ export class CacheManager {
     this.importIndex.clear();
     this.childIndex.clear();
     this.fileImportIndex.clear();
+    this.pathIndex.clear();
+    this.exportIndex.clear();
   }
 
   private rebuildIndexes(catalog: ComponentCatalog): void {
@@ -142,6 +200,16 @@ export class CacheManager {
       // Also index by fileAlias (when defineComponent name differs from filename)
       if (component.fileAlias) {
         this.addToIndex(this.nameIndex, component.fileAlias.toLowerCase(), component);
+      }
+
+      this.addToIndex(
+        this.pathIndex,
+        CacheManager.normalizeModulePath(component.relativePath),
+        component
+      );
+
+      for (const exportName of component.exportedNames || []) {
+        this.addToIndex(this.exportIndex, exportName.toLowerCase(), component);
       }
 
       const importedNames = (component.imports || []).flatMap((imp) => imp.names);
