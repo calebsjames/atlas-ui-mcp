@@ -1,5 +1,6 @@
 import type { Locator, Page } from "playwright";
 import type { ApiCall, FlowAction, NetworkEntry } from "./types.js";
+import { isApiRequest } from "./network.js";
 
 /** Execute one interaction. Throws (with Playwright's message) if it can't. */
 export async function runAction(page: Page, a: FlowAction): Promise<void> {
@@ -125,23 +126,36 @@ export function describeAction(a: FlowAction): string {
 /**
  * Reduce a network-buffer slice to the app's API calls: keep xhr/fetch or any
  * URL under `/api/`, drop the query string, dedupe by method + pathname, and
- * cap the list so a chatty step can't flood the report.
+ * cap the list so a chatty step can't flood the report. Carries each call's
+ * response size and row-count summary when one was captured, so payload/count
+ * assertions land in the same report as {method, path, status}.
  */
 export function toApiCalls(requests: NetworkEntry[]): ApiCall[] {
   const MAX_PER_SLICE = 30;
   const seen = new Set<string>();
   const out: ApiCall[] = [];
   for (const r of requests) {
-    const isApi = r.resourceType === "xhr" || r.resourceType === "fetch" || /\/api\//.test(r.url);
-    if (!isApi) continue;
+    if (!isApiRequest(r)) continue;
     const p = toPathname(r.url);
     const key = r.method + " " + p;
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({ method: r.method, path: p, status: r.status });
+    out.push({ method: r.method, path: p, status: r.status, ...bodyFields(r) });
     if (out.length >= MAX_PER_SLICE) break;
   }
   return out;
+}
+
+/** The response-size / row-count fields of an entry, each omitted when absent. */
+export function bodyFields(
+  r: NetworkEntry
+): Pick<ApiCall, "bytes" | "rowCount" | "rowsFrom" | "totalCount"> {
+  return {
+    ...(r.bytes != null ? { bytes: r.bytes } : {}),
+    ...(r.rowCount != null ? { rowCount: r.rowCount } : {}),
+    ...(r.rowsFrom != null ? { rowsFrom: r.rowsFrom } : {}),
+    ...(r.totalCount != null ? { totalCount: r.totalCount } : {}),
+  };
 }
 
 /** URL → pathname (query dropped). Non-URL strings pass through unchanged. */

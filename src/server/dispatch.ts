@@ -13,6 +13,7 @@ import { findComponentUsages } from "../tools/findComponentUsages.js";
 import { getArchitectureOverview } from "../tools/getArchitectureOverview.js";
 import { getDependencyChain } from "../tools/getDependencyChain.js";
 import { getRouteMap } from "../tools/getRouteMap.js";
+import { getSectionMap } from "../tools/getSectionMap.js";
 import { getHookDetail } from "../tools/getHookDetail.js";
 import { findDeadCode } from "../tools/findDeadCode.js";
 import { getDataFlow } from "../tools/getDataFlow.js";
@@ -107,6 +108,8 @@ const HANDLERS: Record<string, ToolHandler> = {
 
   get_route_map: (_args, ctx) => getRouteMap(ctx.routeAnalyzer, ctx.scanner, ctx.cache),
 
+  get_section_map: (_args, ctx) => getSectionMap(ctx.routeAnalyzer, ctx.scanner, ctx.cache),
+
   get_hook_detail: (args, ctx) =>
     getHookDetail(
       { name: requireStringArg(args, "name"), file: args?.file as string | undefined },
@@ -144,6 +147,7 @@ const HANDLERS: Record<string, ToolHandler> = {
       {
         component: args?.component as string | undefined,
         route: args?.route as string | undefined,
+        section: args?.section as string | undefined,
         params: args?.params as Record<string, string> | undefined,
         fullPage: args?.fullPage as boolean | undefined,
         settleMs: args?.settleMs as number | undefined,
@@ -169,6 +173,7 @@ const HANDLERS: Record<string, ToolHandler> = {
       {
         name: requireStringArg(args, "name"),
         file: args?.file as string | undefined,
+        section: args?.section as string | undefined,
         params: args?.params as Record<string, string> | undefined,
         settleMs: args?.settleMs as number | undefined,
         depth: args?.depth as number | undefined,
@@ -195,6 +200,7 @@ const HANDLERS: Record<string, ToolHandler> = {
       {
         component: args?.component as string | undefined,
         route: args?.route as string | undefined,
+        section: args?.section as string | undefined,
         url: args?.url as string | undefined,
         params: args?.params as Record<string, string> | undefined,
         settleMs: args?.settleMs as number | undefined,

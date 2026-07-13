@@ -1,10 +1,10 @@
-import fs from "fs/promises";
 import type { RouteAnalyzer } from "../analyzer/routeAnalyzer.js";
 import type { ComponentScanner } from "../scanner/componentScanner.js";
 import type { CacheManager } from "../cache/cacheManager.js";
+import type { FlowAction } from "./types.js";
 import { getRouteMap, type RouteMapEntry } from "../tools/getRouteMap.js";
 import { findByLayers, ROUTE_OWNER_LAYERS } from "../tools/shared.js";
-import { detectViewGate, type ViewGate } from "./viewGate.js";
+import { planSectionReveal } from "./sectionReveal.js";
 import { toAbsoluteUrl } from "../util.js";
 
 export interface ResolvedRoute {
@@ -17,13 +17,28 @@ export interface ResolvedRoute {
   /** Dynamic segments we had to guess a value for (no param supplied). */
   guessedParams: string[];
   /**
-   * Present when the requested component is conditionally rendered inside the
-   * routed page behind a view switch (`v-if="currentView === 'X'"`). When the
-   * gate variable is wired to a route.query key, the query param has been
-   * appended to `url` and `applied` is true; otherwise the gate is only
-   * reported so the caller knows an interaction is needed to reveal it.
+   * Interactions to run AFTER navigating to reveal a section that a click
+   * switches to (not URL-addressable). The runtime tools run these before they
+   * screenshot / read the network, so the section's own render and traffic are
+   * what get captured.
    */
-  viewGate?: ViewGate & { applied: boolean };
+  revealActions?: FlowAction[];
+  /**
+   * Present when the resolved target is a section inside a view-multiplexing
+   * container (a one-route shell). Describes how it was revealed: a URL query
+   * param (already appended to `url`), a click (see `revealActions`), or
+   * `unknown` when no static reveal exists (an interaction is needed).
+   */
+  viewSection?: {
+    container: string;
+    section?: string;
+    selector?: string;
+    via: "query" | "click" | "unknown";
+    condition?: string;
+    /** Whether we auto-revealed (query appended or revealActions attached). */
+    applied: boolean;
+    note?: string;
+  };
 }
 
 /**
@@ -36,6 +51,8 @@ export async function resolveRoute(
     baseUrl: string;
     component?: string;
     route?: string;
+    /** Reveal this section (by id) inside the resolved container page. */
+    section?: string;
     params?: Record<string, string>;
     defaultParams?: Record<string, string>;
   },
@@ -94,18 +111,39 @@ export async function resolveRoute(
 
   const { url, filled, guessed } = fillSegments(opts.baseUrl, match.path, params);
 
-  let viewGate: ResolvedRoute["viewGate"];
+  let revealActions: FlowAction[] | undefined;
+  let viewSection: ResolvedRoute["viewSection"];
   let finalUrl = url;
-  if (matchedChildName) {
-    const gate = await detectGateInPage(match, matchedChildName, cache);
-    if (gate) {
-      const applied = !!(gate.queryKey && gate.queryValue !== undefined);
-      if (applied) {
-        finalUrl +=
-          (finalUrl.includes("?") ? "&" : "?") +
-          `${gate.queryKey}=${encodeURIComponent(gate.queryValue!)}`;
+
+  // Reveal target: an explicit section id, or the child we resolved through a
+  // container's childComponents list. Either drives the section-reveal engine.
+  const target =
+    opts.section != null
+      ? { sectionId: opts.section }
+      : matchedChildName
+        ? { child: matchedChildName }
+        : null;
+  if (target) {
+    const page = findByLayers(cache.getByName(match.component), ROUTE_OWNER_LAYERS);
+    if (page) {
+      const plan = await planSectionReveal(page.path, page.name, target);
+      if (plan) {
+        if (plan.queryParam) {
+          finalUrl +=
+            (finalUrl.includes("?") ? "&" : "?") +
+            `${plan.queryParam.key}=${encodeURIComponent(plan.queryParam.value)}`;
+        }
+        if (plan.actions) revealActions = plan.actions;
+        viewSection = {
+          container: plan.container,
+          ...(plan.section != null ? { section: plan.section } : {}),
+          ...(plan.selector != null ? { selector: plan.selector } : {}),
+          via: plan.via,
+          ...(plan.condition ? { condition: plan.condition } : {}),
+          applied: plan.applied,
+          ...(plan.note ? { note: plan.note } : {}),
+        };
       }
-      viewGate = { ...gate, applied };
     }
   }
 
@@ -116,28 +154,9 @@ export async function resolveRoute(
     isProtected: match.isProtected,
     filledParams: filled,
     guessedParams: guessed,
-    viewGate,
+    ...(revealActions ? { revealActions } : {}),
+    ...(viewSection ? { viewSection } : {}),
   };
-}
-
-/**
- * When resolution fell through to a page's childComponents list, look for a
- * query-param-driven render gate on that child inside the page source (the
- * view-container pattern). Best-effort: any read/parse failure means no gate.
- */
-async function detectGateInPage(
-  match: RouteMapEntry,
-  childName: string,
-  cache: CacheManager
-): Promise<ViewGate | null> {
-  const page = findByLayers(cache.getByName(match.component), ROUTE_OWNER_LAYERS);
-  if (!page) return null;
-  try {
-    const source = await fs.readFile(page.path, "utf-8");
-    return detectViewGate(source, childName);
-  } catch {
-    return null;
-  }
 }
 
 /** Replace `:segment` / `[segment]` placeholders with concrete values. */

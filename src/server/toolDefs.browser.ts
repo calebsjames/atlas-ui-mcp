@@ -48,6 +48,11 @@ export const BROWSER_TOOLS = [
           description:
             'Optional: render a raw route path directly instead (e.g., "/patients/:id"). Use instead of `component`.',
         },
+        section: {
+          type: "string",
+          description:
+            'Optional: reveal a specific in-app section of a one-route shell (see get_section_map) — e.g. section "build-sheets" of a tabbed page. Auto-appends the query param or clicks the section\'s activator after load so the screenshot shows that section, not the container default. You can also just name the section\'s child `component`; it is revealed the same way.',
+        },
         params: {
           type: "object",
           description:
@@ -119,6 +124,11 @@ export const BROWSER_TOOLS = [
           type: "string",
           description: "Optional path substring to disambiguate when the name matches multiple files",
         },
+        section: {
+          type: "string",
+          description:
+            'Optional: reveal an in-app section of a one-route shell (see get_section_map) before reading the network — its reveal click runs first, so the section\'s OWN fetches are observed too.',
+        },
         params: {
           type: "object",
           description: 'Values for dynamic route segments, e.g. {"id": "123"}.',
@@ -157,6 +167,7 @@ export const BROWSER_TOOLS = [
               component: { type: "string", description: "Catalog component name to navigate to (resolved to a URL via the route map)." },
               route: { type: "string", description: "Route path to navigate to." },
               url: { type: "string", description: "Absolute URL to navigate to." },
+              section: { type: "string", description: "Reveal this in-app section of a one-route shell (see get_section_map) after navigating — its activator click is prepended to this step's actions." },
               params: { type: "object", description: "Dynamic route segment values, e.g. {\"id\": \"123\"}." },
               actions: {
                 type: "array",
@@ -212,6 +223,11 @@ export const BROWSER_TOOLS = [
         },
         route: { type: "string", description: 'Route path to open (e.g., "/patients/:id").' },
         url: { type: "string", description: "Absolute URL or dev-server-relative path to open." },
+        section: {
+          type: "string",
+          description:
+            "Optional: reveal an in-app section of a one-route shell (see get_section_map) before inspecting, so its mounted components are what get reported.",
+        },
         params: {
           type: "object",
           description: 'Values for dynamic route segments, e.g. {"id": "123"}.',

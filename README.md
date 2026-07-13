@@ -172,6 +172,20 @@ Traces upstream (what uses it) and downstream (what it depends on) for any item.
 ### `get_route_map`
 Full route → page → component mapping with protection status, hooks used, child components, dynamic segments, and nested routes. Covers React Router, Vue Router, and file-based routing (Next.js App/Pages Router, Nuxt).
 
+### `get_section_map`
+The companion to `get_route_map` for SPAs that multiplex **one route** into several in-app sections — a role shell / tabbed page / sidebar switch where the lists are section switches, not routes (so `get_route_map` can't point at them). For each routed page (and each page/root shell) it detects a **view multiplexer**: a single state variable gating sibling sub-views. Works for both frameworks off their own constructs — Vue `v-if="view === 'x'"` + `@click="view = 'x'"`, React `{tab === 'x' && <X/>}` + `onClick={() => setTab('x')}` — never off app-specific names.
+
+Returns `{ containers, note? }`. Each container carries its `route` (when routed), its `selector` (the state variable), and `sections[]`. Each section has:
+- `id` — the literal the selector takes for this section (e.g. `"prescriptions"`)
+- `child` — the component rendered for it
+- `reachedBy` — `query` (the view syncs to a URL param), `click` (a control switches it), or `unknown` (statically unprovable — e.g. a store/reducer or non-literal condition; drive the UI to explore)
+- `queryParam` — `{ key, value }` when URL-reachable
+- `activator` — `{ selector, label }`, the drivable control that switches to the section (a `[data-testid]` or `text=` selector), when statically identifiable
+
+`note` (present only on an empty result) explains why nothing was found. A fully route-based app returns no containers — this tool adds signal exactly where the route map goes quiet.
+
+**Driving to a section.** The runtime tools consume this map so you don't have to wire the click yourself. `render_component`, `verify_data_flow`, `inspect_rendered_page`, and each `capture_flow` step take a `section` argument (or you can just name the section's `child` component) — the tool navigates to the container's route and then reveals the section automatically: it appends the query param for a `query` section, or clicks the `activator` for a `click` section, *before* it screenshots and reads the network. So a section's own render, console, and API calls (with Phase-1 row counts) are what get captured — no guessed sidebar clicks.
+
 ### `get_hook_detail`
 Deep dive on a hook/composable — parameters, return type, query keys, adapter calls, data fetching pattern, and which components use it.
 
@@ -190,13 +204,13 @@ The tools above understand your code statically. These five drive a real (headle
 Powered by Playwright/Chromium. They require your dev server to be running and degrade gracefully — the static tools work even if the browser binaries aren't installed.
 
 ### `render_component`
-Render a catalog component in the live app and return a **screenshot plus runtime diagnostics** (console errors, uncaught exceptions, failed network requests). Resolves `component` → URL via the route map; or pass a raw `route`. Pass `params` for dynamic segments (e.g. `{"id": "123"}`). The screenshot comes back as an image the agent can look at.
+Render a catalog component in the live app and return a **screenshot plus runtime diagnostics** (console errors, uncaught exceptions, failed network requests). Resolves `component` → URL via the route map; or pass a raw `route`. Pass `params` for dynamic segments (e.g. `{"id": "123"}`). The screenshot comes back as an image the agent can look at. For a component that lives inside a one-route shell, pass `section` (see `get_section_map`) — or just name the section's child `component` — and it auto-reveals that section (query-append or activator click) before the shot, reporting how under `viewSection`.
 
 ### `check_page`
 The "did my change break anything" workhorse. Navigate to any `url` (absolute, or a path relative to the dev server) and get back a screenshot + console errors + uncaught exceptions + failed network calls. Call it after an edit to confirm the page still renders clean.
 
 ### `verify_data_flow`
-Source-vs-runtime check. Renders a component's route, watches the **real network traffic**, and checks it against the endpoints `get_data_flow` predicts (child tree and stores included). Matching is method-aware — a predicted `GET /users` no longer "confirms" an observed `DELETE /users`. The key output is **`unexpectedApiCalls`** — observed calls that map to *no* predicted endpoint. That's the real drift signal: dynamic/template-literal URLs, app-level bootstrap fetches outside the component's tree, or genuine divergence. `verdict` is `confirmed` when every observed call is accounted for. (Predicted-but-unobserved endpoints are expected — a render exercises only a slice of what the subtree *could* call — so those are reported as a count, not a list.)
+Source-vs-runtime check. Renders a component's route, watches the **real network traffic**, and checks it against the endpoints `get_data_flow` predicts (child tree and stores included). Matching is method-aware — a predicted `GET /users` no longer "confirms" an observed `DELETE /users`. The key output is **`unexpectedApiCalls`** — observed calls that map to *no* predicted endpoint. That's the real drift signal: dynamic/template-literal URLs, app-level bootstrap fetches outside the component's tree, or genuine divergence. `verdict` is `confirmed` when every observed call is accounted for. (Predicted-but-unobserved endpoints are expected — a render exercises only a slice of what the subtree *could* call — so those are reported as a count, not a list.) Each observed call (matched or unexpected) also carries the response-body summary — `bytes`, `rowCount`, `rowsFrom`, `totalCount` — so drift and payload-shape can be read from one result.
 
 Pass `actions` (same shape as `capture_flow` actions) to drive the page after load and before the network is read — fill the form, click Save, and the resulting `POST` gets verified too. Without actions, only render-time calls (typically GETs) are observable.
 
@@ -204,7 +218,9 @@ Pass `actions` (same shape as `capture_flow` actions) to drive the page after lo
 The reverse bridge. Opens a live page and reports which **catalog components are actually mounted** on it, mapped back to source files — "what do I edit to change the thing I'm looking at?" without grepping. Works by walking React/Vue dev internals, so it needs the dev build (not prod). Takes a catalog `component`, a `route`, or a raw `url`; returns `{ framework, mounted: [{name, count, relativePath, architectureLayer}], unmatched }`, text-only.
 
 ### `capture_flow`
-Drive a multi-step user flow against a **single persistent page** and screenshot each step. A step can navigate (`component`/`route`/`url`) and/or run **interactions** — so an agent can log in, fill a form, submit, and verify the next screen as one flow. Page state (cookies, form values, SPA route) carries across steps. Each step reports the **API calls it triggered** (`{method, path, status}`), so "did clicking Save actually POST?" is answered in the same call. Aggregates diagnostics into a single pass/fail; on a failed action it screenshots the broken state and stops.
+Drive a multi-step user flow against a **single persistent page** and screenshot each step. A step can navigate (`component`/`route`/`url`) and/or run **interactions** — so an agent can log in, fill a form, submit, and verify the next screen as one flow. Page state (cookies, form values, SPA route) carries across steps. Each step reports the **API calls it triggered** (`{method, path, status, bytes, rowCount, rowsFrom, totalCount}`), so "did clicking Save actually POST?" *and* "how many rows did that list return?" are answered in the same call. Aggregates diagnostics into a single pass/fail; on a failed action it screenshots the broken state and stops.
+
+> **Response-body summary:** for JSON API responses, each call also carries a payload summary alongside `{method, path, status}` — `bytes` (response size), `rowCount` (rows in the primary collection), `rowsFrom` (which JSON key was counted: `$` for a top-level array, or a key path like `data` / `data.items`), and `totalCount` (a server-reported pagination total, when the body has one). Count-level assertions — "the projects call returned 1578 scoped rows" — no longer need a drop to `curl`. The row heuristic is framework- and app-agnostic: it counts a top-level array, a well-known envelope key (`data`/`results`/`items`/`records`/`content`/`edges`/…), or an object's sole array property, and always reports `rowsFrom` so a wrong guess is visible rather than silent. Bodies are read only for xhr/fetch or `/api/` responses, and only their shape — never their contents — is reported.
 
 Tip: `get_component_detail` exposes each component's `testIds` and `formFields` (with ready-made selectors) — build your steps from those instead of reading source.
 

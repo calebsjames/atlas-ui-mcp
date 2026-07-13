@@ -15,6 +15,7 @@ export async function renderComponent(
   args: {
     component?: string;
     route?: string;
+    section?: string;
     params?: Record<string, string>;
     fullPage?: boolean;
     settleMs?: number;
@@ -31,6 +32,7 @@ export async function renderComponent(
       baseUrl: session.baseUrl,
       component: args.component,
       route: args.route,
+      section: args.section,
       params: args.params,
       defaultParams: browserConfig.routeParams,
     },
@@ -44,6 +46,8 @@ export async function renderComponent(
     fullPage: args.fullPage,
     settleMs: args.settleMs,
     requireAuth: !args.public,
+    // Reveal a click-switched section (if any) after load, before the screenshot.
+    actions: resolved.revealActions,
   });
 
   const notes: string[] = [];
@@ -64,17 +68,23 @@ export async function renderComponent(
       "This route is marked protected — if you see a login/redirect, the app needs an authenticated session."
     );
   }
-  if (resolved.viewGate) {
-    notes.push(
-      resolved.viewGate.applied
-        ? `"${args.component}" is conditionally rendered inside ${resolved.component} behind ` +
-            `\`${resolved.viewGate.condition}\` — auto-appended ` +
-            `?${resolved.viewGate.queryKey}=${resolved.viewGate.queryValue} to reveal it.`
-        : `"${args.component}" is conditionally rendered inside ${resolved.component} behind ` +
-            `\`${resolved.viewGate.condition}\`, and no route.query wiring was detected — ` +
-            `the screenshot likely shows the container's default view; an interaction may be ` +
-            `needed to reveal the component.`
-    );
+  if (resolved.viewSection) {
+    const vs = resolved.viewSection;
+    const target = args.section ? `Section "${args.section}"` : `"${args.component}"`;
+    if (vs.applied) {
+      notes.push(
+        vs.via === "query"
+          ? `${target} is a section of ${vs.container} — auto-appended a query param to reveal it.`
+          : `${target} is a section of ${vs.container} — clicked its activator after load to reveal it ` +
+              `(reported in performed).`
+      );
+    } else {
+      notes.push(
+        vs.note ??
+          `${target} is a section of ${vs.container} (keyed on ${vs.selector}) with no statically ` +
+            `resolvable reveal — the screenshot likely shows the default view; an interaction is needed.`
+      );
+    }
   }
 
   return captureResponse(
@@ -85,8 +95,9 @@ export async function renderComponent(
         url: resolved.url,
         filledParams: resolved.filledParams,
         isProtected: resolved.isProtected,
-        viewGate: resolved.viewGate,
+        ...(resolved.viewSection ? { viewSection: resolved.viewSection } : {}),
       },
+      performed: capture.performed,
       notes,
       ...diagnostics(capture),
     },

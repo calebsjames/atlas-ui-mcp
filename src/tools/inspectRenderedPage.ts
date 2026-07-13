@@ -4,6 +4,8 @@ import type { ComponentScanner } from "../scanner/componentScanner.js";
 import type { CacheManager } from "../cache/cacheManager.js";
 import type { BrowserConfig } from "../types.js";
 import { resolveRoute } from "../browser/resolveRoute.js";
+import { runAction } from "../browser/actions.js";
+import type { FlowAction } from "../browser/types.js";
 import { ensureCatalog, findByLayers, RENDERABLE_LAYERS } from "./shared.js";
 import type { McpContentResult } from "../browser/response.js";
 import { toAbsoluteUrl } from "../util.js";
@@ -25,7 +27,7 @@ interface RenderedComponents {
  * server — hence the explanatory `note` when nothing is detected.
  */
 export async function inspectRenderedPage(
-  args: { component?: string; route?: string; url?: string; params?: Record<string, string>; settleMs?: number },
+  args: { component?: string; route?: string; section?: string; url?: string; params?: Record<string, string>; settleMs?: number },
   session: BrowserSession,
   routeAnalyzer: RouteAnalyzer,
   scanner: ComponentScanner,
@@ -36,6 +38,7 @@ export async function inspectRenderedPage(
   // dev-server-relative); otherwise a component/route goes through the static
   // route map, exactly like render_component.
   let url: string;
+  let revealActions: FlowAction[] | undefined;
   if (args.url) {
     url = toAbsoluteUrl(session.baseUrl, args.url);
   } else if (args.component || args.route) {
@@ -44,6 +47,7 @@ export async function inspectRenderedPage(
         baseUrl: session.baseUrl,
         component: args.component,
         route: args.route,
+        section: args.section,
         params: args.params,
         defaultParams: browserConfig.routeParams,
       },
@@ -52,6 +56,7 @@ export async function inspectRenderedPage(
       cache
     );
     url = resolved.url;
+    revealActions = resolved.revealActions;
   } else {
     throw new Error('Provide a "url", or a "component"/"route" to resolve via the route map.');
   }
@@ -64,6 +69,14 @@ export async function inspectRenderedPage(
       await page.goto(url, { waitUntil: "networkidle", timeout: 30_000 });
     } catch {
       // A slow/failed nav still leaves something to inspect; press on.
+    }
+    // Reveal a click-switched section before inspecting what's mounted.
+    for (const action of revealActions ?? []) {
+      try {
+        await runAction(page, action);
+      } catch {
+        // Best-effort reveal — inspect whatever rendered regardless.
+      }
     }
     if (args.settleMs) await page.waitForTimeout(args.settleMs);
 

@@ -5,6 +5,8 @@ import type { ComponentScanner } from "../scanner/componentScanner.js";
 import type { CacheManager } from "../cache/cacheManager.js";
 import type { BrowserConfig } from "../types.js";
 import { resolveRoute } from "../browser/resolveRoute.js";
+import { bodyFields } from "../browser/actions.js";
+import { isApiRequest } from "../browser/network.js";
 import { getDataFlow } from "./getDataFlow.js";
 import { captureResponse, diagnostics, type McpContentResult } from "../browser/response.js";
 
@@ -23,6 +25,7 @@ export async function verifyDataFlow(
   args: {
     name: string;
     file?: string;
+    section?: string;
     params?: Record<string, string>;
     settleMs?: number;
     depth?: number;
@@ -56,6 +59,7 @@ export async function verifyDataFlow(
     {
       baseUrl: session.baseUrl,
       component: args.name,
+      section: args.section,
       params: args.params,
       defaultParams: browserConfig.routeParams,
     },
@@ -68,22 +72,28 @@ export async function verifyDataFlow(
     label: `dataflow-${args.name}`,
     waitUntil: "networkidle",
     settleMs: args.settleMs ?? 500,
-    // Run mutations (if any) after load, before we read the network, so their
-    // requests count as observed calls.
-    actions: args.actions,
+    // Reveal a click-switched section first (if any), then run any caller
+    // mutations — all before we read the network, so the section's own fetches
+    // AND the mutations count as observed calls.
+    actions: [...(resolved.revealActions ?? []), ...(args.actions ?? [])],
   });
 
   // Observed API calls, deduped by method + path (apps poll / repeat).
-  const apiCalls = dedupeCalls(
-    capture.requests.filter(
-      (r) => r.resourceType === "xhr" || r.resourceType === "fetch" || /\/api\//.test(r.url)
-    )
-  );
+  const apiCalls = dedupeCalls(capture.requests.filter(isApiRequest));
 
   const predictions = predicted.map(parseEndpoint).filter((pred) => pred.prefix);
 
-  const matched: Array<{ method: string; url: string; status?: number; matchedPrefix: string }> = [];
-  const unexpectedApiCalls: Array<{ method: string; url: string; status?: number }> = [];
+  type ObservedCall = {
+    method: string;
+    url: string;
+    status?: number;
+    bytes?: number;
+    rowCount?: number;
+    rowsFrom?: string;
+    totalCount?: number;
+  };
+  const matched: Array<ObservedCall & { matchedPrefix: string }> = [];
+  const unexpectedApiCalls: ObservedCall[] = [];
   for (const call of apiCalls) {
     const p = pathname(call.url);
     const method = call.method.toUpperCase();
@@ -97,9 +107,9 @@ export async function verifyDataFlow(
     );
     if (hit) {
       const matchedPrefix = hit.method ? `${hit.method} ${hit.prefix}` : hit.prefix;
-      matched.push({ method: call.method, url: call.url, status: call.status, matchedPrefix });
+      matched.push({ method: call.method, url: call.url, status: call.status, ...bodyFields(call), matchedPrefix });
     } else {
-      unexpectedApiCalls.push({ method: call.method, url: call.url, status: call.status });
+      unexpectedApiCalls.push({ method: call.method, url: call.url, status: call.status, ...bodyFields(call) });
     }
   }
 
@@ -115,6 +125,7 @@ export async function verifyDataFlow(
       target: args.name,
       route: resolved.routePath,
       url: resolved.url,
+      ...(resolved.viewSection ? { viewSection: resolved.viewSection } : {}),
       verdict,
       traceDepth: flow?.depth,
       predictedEndpointCount: predicted.length,

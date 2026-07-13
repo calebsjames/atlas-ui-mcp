@@ -12,6 +12,14 @@ export interface NetworkEntry {
   status?: number;
   ok?: boolean;
   failure?: string;
+  /** Response size in bytes (Content-Length, or the buffered body length). */
+  bytes?: number;
+  /** Rows in the primary collection of a JSON body (see BodySummary). */
+  rowCount?: number;
+  /** Where `rowCount` came from: "$" (top-level array) or a JSON key path. */
+  rowsFrom?: string;
+  /** Server-reported pagination total, when the body carries one. */
+  totalCount?: number;
 }
 
 export interface CaptureResult {
@@ -122,4 +130,12 @@ export interface ApiCall {
   /** URL pathname only — query string is intentionally dropped. */
   path: string;
   status?: number;
+  /** Response size in bytes, so payload-level assertions don't need curl. */
+  bytes?: number;
+  /** Rows in the JSON body's primary collection (see BodySummary). */
+  rowCount?: number;
+  /** Which key `rowCount` was taken from: "$" (top-level array) or a key path. */
+  rowsFrom?: string;
+  /** Server-reported pagination total, when present. */
+  totalCount?: number;
 }

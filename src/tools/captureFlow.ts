@@ -13,6 +13,8 @@ export interface FlowStep {
   component?: string;
   route?: string;
   url?: string;
+  /** Reveal this section (by id) inside the step's navigation target after loading. */
+  section?: string;
   params?: Record<string, string>;
   /** Interactions to run after navigating (or on the current page if no nav target). */
   actions?: FlowAction[];
@@ -57,6 +59,7 @@ export async function captureFlow(
     }
 
     let url: string | undefined;
+    let revealActions: FlowAction[] | undefined;
     if (step.url) {
       // Accept absolute URLs or dev-server-relative paths, like check_page does.
       url = toAbsoluteUrl(session.baseUrl, step.url);
@@ -66,6 +69,7 @@ export async function captureFlow(
           baseUrl: session.baseUrl,
           component: step.component,
           route: step.route,
+          section: step.section,
           params: step.params,
           defaultParams: browserConfig.routeParams,
         },
@@ -74,12 +78,16 @@ export async function captureFlow(
         cache
       );
       url = r.url;
+      revealActions = r.revealActions;
     }
+
+    // Reveal a click-switched section first, then run the step's own actions.
+    const actions = revealActions ? [...revealActions, ...(step.actions ?? [])] : step.actions;
 
     resolved.push({
       label: step.label || step.component || step.route || step.url || `step ${i + 1}`,
       url,
-      actions: step.actions,
+      actions,
       settleMs: step.settleMs,
       noScreenshot: step.noScreenshot,
       continueOnError: step.continueOnError,

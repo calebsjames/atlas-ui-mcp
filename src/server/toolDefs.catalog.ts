@@ -178,6 +178,16 @@ export const CATALOG_TOOLS = [
     },
   },
   {
+    name: "get_section_map",
+    description:
+      "The section-map companion to get_route_map, for SPAs that multiplex ONE route into several in-app sections (a role shell / tabbed page / sidebar switch where the lists are section switches, not routes). For each routed page (and each page/root shell) it detects a view multiplexer — a single state variable gating sibling views (Vue `v-if=\"view === 'x'\"`, React `{tab === 'x' && <X/>}`) — and returns each container's `selector` (the state variable), its `route` when routed, and `sections[]`. Each section has an `id` (the literal value), the `child` component it renders, `reachedBy` (`query` | `click` | `unknown`), a `queryParam` when the view syncs to the URL, and an `activator` ({selector,label}) — the control that switches to it — when statically identifiable. Works for both Vue and React. Returns `{ containers, note? }`; `note` explains an empty result.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      required: [],
+    },
+  },
+  {
     name: "get_hook_detail",
     description:
       "Get detailed information about a custom hook or Vue composable. Returns parameters, return type, query keys, adapter/service calls, data fetching pattern, and which components use this hook/composable. If the name matches multiple hooks, returns `ambiguous` with candidates — re-call with `file`.",

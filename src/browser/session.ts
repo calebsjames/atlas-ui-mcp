@@ -12,7 +12,14 @@ import type {
   ResolvedFlowStep,
 } from "./types.js";
 import { describeAction, runAction, toApiCalls } from "./actions.js";
+import { isApiRequest, summarizeJsonBody } from "./network.js";
 import { errMessage, toAbsoluteUrl } from "../util.js";
+
+/**
+ * Skip body summarization above this size — record the byte count, but don't
+ * buffer/parse a multi-megabyte payload just to count its rows.
+ */
+const MAX_BODY_SUMMARY_BYTES = 5_000_000;
 
 interface DiagBuffers {
   consoleErrors: ConsoleEntry[];
@@ -21,6 +28,8 @@ interface DiagBuffers {
   failedRequests: NetworkEntry[];
   requests: NetworkEntry[];
   byUrl: Map<string, NetworkEntry>;
+  /** In-flight response-body reads, awaited before a call slices diagnostics. */
+  pending: Promise<void>[];
 }
 
 /**
@@ -263,6 +272,9 @@ export class BrowserSession {
     const title = await page.title().catch(() => "");
     const durationMs = Date.now() - start;
 
+    // Ensure body summaries for this call's requests have resolved before slicing.
+    await this.settlePending(diag);
+
     const consoleErrors = diag.consoleErrors.slice(mark.ce);
     const consoleWarnings = diag.consoleWarnings.slice(mark.cw);
     const pageErrors = diag.pageErrors.slice(mark.pe);
@@ -368,6 +380,9 @@ export class BrowserSession {
       if (buf) screenshotBase64 = buf.toString("base64");
     }
 
+    // Ensure body summaries for this step's requests have resolved before slicing.
+    await this.settlePending(diag);
+
     const consoleErrors = diag.consoleErrors.slice(mark.ce).map((e) => e.text);
     const pageErrors = diag.pageErrors.slice(mark.pe);
     const failedRequests = diag.failedRequests.slice(mark.fr);
@@ -391,6 +406,18 @@ export class BrowserSession {
         pageErrors.length === 0 &&
         failedRequests.length === 0,
     };
+  }
+
+  /**
+   * Await any in-flight response-body summaries so the diagnostics slice a call
+   * is about to read has its bytes/rowCount populated. Swaps in a fresh buffer
+   * first, so a promise pushed mid-await isn't dropped when this batch clears.
+   */
+  private async settlePending(diag: DiagBuffers): Promise<void> {
+    if (diag.pending.length === 0) return;
+    const batch = diag.pending;
+    diag.pending = [];
+    await Promise.allSettled(batch);
   }
 
   /** Current diagnostics buffer positions, for slicing out one call's entries. */
@@ -420,6 +447,7 @@ export class BrowserSession {
       failedRequests: [],
       requests: [],
       byUrl: new Map(),
+      pending: [],
     };
     page.on("console", (msg) => {
       const type = msg.type();
@@ -439,9 +467,38 @@ export class BrowserSession {
     });
     page.on("response", (res) => {
       const entry = d.byUrl.get(res.url() + res.request().method());
-      if (entry) {
-        entry.status = res.status();
-        entry.ok = res.ok();
+      if (!entry) return;
+      entry.status = res.status();
+      entry.ok = res.ok();
+
+      const headers = res.headers();
+      const cl = headers["content-length"];
+      if (cl && /^\d+$/.test(cl)) entry.bytes = parseInt(cl, 10);
+
+      // Summarize API JSON bodies so count-level assertions ("1578 rows") don't
+      // need a drop to curl. Only API-classified, JSON responses under the size
+      // cap. Reading a body is async and can't be awaited from an event handler,
+      // so we park the promise and settle it before a call slices diagnostics.
+      const contentType = headers["content-type"] || "";
+      if (
+        isApiRequest(entry) &&
+        /\bjson\b/i.test(contentType) &&
+        (entry.bytes == null || entry.bytes <= MAX_BODY_SUMMARY_BYTES)
+      ) {
+        const p = res
+          .body()
+          .then((buf) => {
+            if (entry.bytes == null) entry.bytes = buf.length;
+            if (buf.length <= MAX_BODY_SUMMARY_BYTES) {
+              const summary = summarizeJsonBody(buf);
+              if (summary) Object.assign(entry, summary);
+            }
+          })
+          .catch(() => {
+            // No body (204/redirect/HEAD), or it was already consumed — the
+            // header byte count (if any) still stands.
+          });
+        d.pending.push(p);
       }
     });
     page.on("requestfailed", (req) => {

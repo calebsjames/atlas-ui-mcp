@@ -8,6 +8,11 @@ export function errMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/** Escape a string for literal use inside a RegExp. */
+export function escapeRegex(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 /** Join a possibly-relative path/URL onto a base URL (absolute URLs pass through). */
 export function toAbsoluteUrl(baseUrl: string, raw: string): string {
   if (raw.startsWith("http")) return raw;

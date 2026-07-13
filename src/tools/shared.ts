@@ -7,6 +7,12 @@ import type {
   ComponentCatalog,
 } from "../types.js";
 
+// escapeRegex lives in the leaf util module so analyzer code can use it without
+// pulling in tools/shared (which would cycle: analyzer → shared → scanner →
+// analyzer). Re-exported here so existing `from "../tools/shared.js"` importers
+// keep working.
+export { escapeRegex } from "../util.js";
+
 export async function ensureCatalog(
   scanner: ComponentScanner,
   cache: CacheManager
@@ -17,10 +23,6 @@ export async function ensureCatalog(
   const catalog = await scanner.scan();
   cache.setCatalog(catalog);
   return catalog;
-}
-
-export function escapeRegex(str: string): string {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /** Does this component's path contain the `file` substring? No filter = match. */

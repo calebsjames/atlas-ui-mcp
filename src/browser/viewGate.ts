@@ -1,4 +1,5 @@
-import { escapeRegex } from "../tools/shared.js";
+import { escapeRegex } from "../util.js";
+import { parseEqualityGate, findVueRouteQueryKey } from "../analyzer/viewContainer.js";
 
 /**
  * A conditional render gate on a child component inside a routed page — the
@@ -34,38 +35,11 @@ export function detectViewGate(pageSource: string, childName: string): ViewGate 
   if (!condMatch) return null;
   const condition = (condMatch[1] ?? condMatch[2]).trim();
 
-  // Simple equality only: `X === 'lit'` / `'lit' == X` (either side, 2 or 3 =).
-  const eq =
-    /^(?:([A-Za-z_$][\w$]*)(?:\.value)?\s*===?\s*(['"])(.*?)\2|(['"])(.*?)\4\s*===?\s*([A-Za-z_$][\w$]*)(?:\.value)?)$/.exec(
-      condition
-    );
-  if (!eq) return { condition };
+  // Simple literal equality only (`X === 'lit'` / `'lit' == X`); a more complex
+  // gate is still reported, condition-only, so callers know an interaction is needed.
+  const gate = parseEqualityGate(condition);
+  if (!gate) return { condition };
 
-  const varName = (eq[1] ?? eq[6]) as string;
-  const literal = (eq[3] ?? eq[5]) as string;
-  const queryKey = findQueryKeyFor(pageSource, varName);
-  return { condition, queryValue: literal, queryKey };
-}
-
-/**
- * Trace a gate variable to the route.query key that drives it. Three wiring
- * shapes cover the app's view containers:
- *  1. reverse sync:  router.replace({ query: { view: currentView.value } })
- *  2. watch/assign:  watch(() => route.query.view, ...) { currentView.value = ... }
- *     (any `route.query.<key>` followed shortly by an assignment INTO the var)
- *  3. direct init:   currentView = <something involving> route.query.view
- */
-function findQueryKeyFor(source: string, varName: string): string | undefined {
-  const v = escapeRegex(varName);
-
-  let m = new RegExp(`query:\\s*\\{\\s*(\\w+):\\s*${v}\\b`).exec(source);
-  if (m) return m[1];
-
-  m = new RegExp(`route\\.query\\.(\\w+)[\\s\\S]{0,300}?\\b${v}(?:\\.value)?\\s*=[^=]`).exec(source);
-  if (m) return m[1];
-
-  m = new RegExp(`\\b${v}(?:\\.value)?\\s*=[^=][^;\\n]*route\\.query\\.(\\w+)`).exec(source);
-  if (m) return m[1];
-
-  return undefined;
+  const queryKey = findVueRouteQueryKey(pageSource, gate.var);
+  return { condition, queryValue: gate.value, queryKey };
 }
