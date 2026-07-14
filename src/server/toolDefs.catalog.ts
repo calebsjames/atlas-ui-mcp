@@ -96,6 +96,56 @@ export const CATALOG_TOOLS = [
     },
   },
   {
+    name: "compare_implementations",
+    description:
+      "Compare two implementations at SUB-FILE granularity and report exactly where they diverge — the safety check to run before unifying near-duplicates that find_similar_components / search_components rank together. Give two symbol references { file, symbol, enclosingSymbol? }; each resolves a function, arrow, class/static method, object getter/method, or computed()/useMemo()/useCallback() (compared by its callback body). Returns verdict `equivalent` (byte-equal after normalization — safe to unify) or `diverges`, plus classified divergences (literal / callee-changed / guard-changed / added-block / removed-block / changed) with source snippets and file line spans. Normalization strips comments/formatting and canonicalizes quotes & numeric literals; identifiers and type annotations are preserved. Works for both Vue (SFC <script> is extracted) and React. b.file may be omitted to compare two symbols in the same file. Note: Options-API `this.x` vs composable `x.value` access styles are NOT normalized in v1.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        a: {
+          type: "object",
+          description: "First implementation to compare.",
+          properties: {
+            file: {
+              type: "string",
+              description:
+                'File containing the symbol — a catalog-relative path, path suffix, or workspace-relative/absolute path (e.g. "src/utils/clubFormTransformer.ts").',
+            },
+            symbol: {
+              type: "string",
+              description:
+                'Name of the function/method/computed/property to compare (e.g. "transformOrderToClub", "groupedShotData").',
+            },
+            enclosingSymbol: {
+              type: "string",
+              description:
+                'Optional: the enclosing function/class/object to scope the search into when `symbol` alone is ambiguous (e.g. "createOrderInventoryIdHelpers" for one of its getters).',
+            },
+          },
+          required: ["file", "symbol"],
+        },
+        b: {
+          type: "object",
+          description: "Second implementation to compare. `file` may be omitted to reuse a.file.",
+          properties: {
+            file: { type: "string", description: "File containing the symbol (defaults to a.file)." },
+            symbol: { type: "string", description: "Name of the symbol to compare." },
+            enclosingSymbol: {
+              type: "string",
+              description: "Optional enclosing symbol to disambiguate the search.",
+            },
+          },
+          required: ["symbol"],
+        },
+        maxDivergences: {
+          type: "number",
+          description: "Cap the number of reported divergences (default 40).",
+        },
+      },
+      required: ["a", "b"],
+    },
+  },
+  {
     name: "get_component_detail",
     description:
       "Get detailed information about a specific component, page, hook, service, adapter, or store by name. Returns full metadata including props, hooks, state, child components, event handlers, data fetching pattern, test ids, form-field selectors, accessibility, API endpoints, and architecture layer. If the name matches multiple items, returns `ambiguous` with candidates — re-call with `file`.",

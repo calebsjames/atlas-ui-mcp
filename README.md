@@ -154,6 +154,16 @@ Returns the TypeScript prop interface for a component — prop names, types, req
 ### `find_similar_components`
 Describe what you're looking for in plain English and it finds matching components using keyword + structural matching (hooks used, child components, data fetching patterns, layer). Returns compact summaries.
 
+### `compare_implementations`
+The reuse **guardrail**. `find_similar_components` / `search_components` score on structural metadata, so they rank near-duplicates to the top — exactly the ones whose subtle behavioral differences matter most — with no signal that the bodies diverge. Before unifying two look-alikes, this tool compares them at **sub-file granularity** and tells you whether that's safe.
+
+Give it two symbol references `{ file, symbol, enclosingSymbol? }`. Each resolves a function, arrow, class/static method, object getter/method, or a `computed()` / `useMemo()` / `useCallback()` (compared by its callback body). It normalizes away comments, formatting, quote style, numeric form, and semicolon/trailing-comma noise, then diffs the token streams and returns:
+
+- `verdict` — `equivalent` (byte-equal after normalization → safe to unify) or `diverges`
+- `divergences[]` — each classified (`literal`, `callee-changed`, `guard-changed`, `operator-changed`, `added-block`, `removed-block`, `changed`) with the original source snippet on each side and file line spans (`locA` / `locB`)
+
+Works for **both Vue and React** off the same engine — a `.vue` `<script>` is extracted to TS and its lines mapped back, so a Vue composable/computed and a React hook/memo compare on equal footing (you can even compare one against the other). `b.file` may be omitted to compare two symbols in the same file. Identifiers and type annotations are preserved (no alpha-renaming); Options-API `this.x` vs composable `x.value` access styles are not normalized in v1.
+
 ### `get_component_detail`
 Full metadata dump for any item — props, hooks, state, children, event handlers, data fetching, `testIds` and `formFields` (drivable selectors for `capture_flow`), accessibility info, API endpoints, architecture layer.
 

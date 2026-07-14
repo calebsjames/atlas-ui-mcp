@@ -8,6 +8,7 @@ import { listAllComponents } from "../tools/listAllComponents.js";
 import { searchComponents } from "../tools/searchComponents.js";
 import { getComponentProps } from "../tools/getComponentProps.js";
 import { findSimilarComponents } from "../tools/findSimilarComponents.js";
+import { compareImplementations, type SymbolRef } from "../tools/compareImplementations.js";
 import { getComponentDetail } from "../tools/getComponentDetail.js";
 import { findComponentUsages } from "../tools/findComponentUsages.js";
 import { getArchitectureOverview } from "../tools/getArchitectureOverview.js";
@@ -80,6 +81,18 @@ const HANDLERS: Record<string, ToolHandler> = {
 
   find_similar_components: (args, ctx) =>
     findSimilarComponents(requireStringArg(args, "description"), ctx.scanner, ctx.cache),
+
+  compare_implementations: (args, ctx) =>
+    compareImplementations(
+      {
+        a: (args?.a ?? {}) as SymbolRef,
+        b: (args?.b ?? {}) as SymbolRef,
+        maxDivergences: args?.maxDivergences as number | undefined,
+      },
+      ctx.scanner,
+      ctx.cache,
+      ctx.workspaceRoot
+    ),
 
   get_component_detail: (args, ctx) =>
     getComponentDetail(
