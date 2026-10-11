@@ -39,6 +39,10 @@ export interface CaptureResult {
   performed: string[];
   /** Set if an action failed; the screenshot still reflects the state reached. */
   actionError?: string;
+  /** Results of `measure` actions / the `measure` option, in order. */
+  measurements?: Measurement[];
+  /** The viewport this capture ran at. */
+  viewport?: { width: number; height: number };
   /**
    * Requests still in flight when the bounded quiet window gave up — the page
    * rendered, but these had not finished (slow API, unrecognised long-poll).
@@ -74,11 +78,19 @@ export interface CaptureOptions {
    * credential can't block them — the login pre-step is skipped entirely.
    */
   requireAuth?: boolean;
+  /** A `browser.profiles` name to log in as (own context); omitted = browser.login. */
+  loginAs?: string;
+  /** Viewport for this call only. */
+  viewport?: { width: number; height: number };
+  /** Selectors to measure (read-only) after load/actions/settle. */
+  measure?: string[];
 }
 
 /** A single interaction performed against the live page during a flow. */
 export interface FlowAction {
-  type: "click" | "fill" | "press" | "select" | "check" | "uncheck" | "hover" | "waitFor";
+  type:
+    | "click" | "fill" | "press" | "select" | "check" | "uncheck" | "hover" | "waitFor"
+    | "scroll" | "wait" | "measure";
   /** CSS selector, or a Playwright selector like `text=Submit` / `role=button[name="Save"]`. */
   selector?: string;
   /**
@@ -95,6 +107,36 @@ export interface FlowAction {
   key?: string;
   /** Per-action timeout in ms (default 10000). */
   timeoutMs?: number;
+  /** `scroll`: pixels to scroll by (window, or the `selector` element's content). */
+  x?: number;
+  y?: number;
+  /** `wait`: milliseconds to wait (default 1000). */
+  ms?: number;
+  /** `measure`: computed-style properties to read (default display/position/overflow/z-index/font-size). */
+  properties?: string[];
+}
+
+/** What a read-only `measure` action reports for one selector. */
+export interface Measurement {
+  selector: string;
+  /** How many elements matched (the first 10 are described). */
+  count: number;
+  elements: Array<{
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    visible: boolean;
+    scrollWidth: number;
+    scrollHeight: number;
+    clientWidth: number;
+    clientHeight: number;
+    /** Content wider than the box (horizontal scroll / clipping). */
+    overflowsX: boolean;
+    styles: Record<string, string>;
+  }>;
+  /** Page-level context: viewport, scroll position, and whether the whole page overflows horizontally. */
+  page: { viewportWidth: number; viewportHeight: number; scrollX: number; scrollY: number; scrollWidth: number; horizontalOverflow: boolean };
 }
 
 /** One step of a flow, already resolved to a concrete URL (if it navigates). */
@@ -112,6 +154,8 @@ export interface ResolvedFlowStep {
   waitUntil?: WaitUntil;
   /** Set internally when `url` reopens the previous call's page for a flow that started without one. */
   reopened?: boolean;
+  /** Resize the flow's page to this viewport before this step (persists for later steps). */
+  viewport?: { width: number; height: number };
 }
 
 export interface FlowStepResult {
@@ -131,6 +175,8 @@ export interface FlowStepResult {
   requestCount: number;
   /** Requests still in flight when this step's bounded quiet window gave up. */
   pendingRequests?: string[];
+  /** Results of this step's `measure` actions. */
+  measurements?: Measurement[];
   /**
    * The app API calls made during this step (xhr/fetch or `/api/` URLs),
    * deduped by method + path and capped, so mutation endpoints triggered by

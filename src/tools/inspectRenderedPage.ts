@@ -27,7 +27,16 @@ interface RenderedComponents {
  * server — hence the explanatory `note` when nothing is detected.
  */
 export async function inspectRenderedPage(
-  args: { component?: string; route?: string; section?: string; url?: string; params?: Record<string, string>; settleMs?: number },
+  args: {
+    component?: string;
+    route?: string;
+    section?: string;
+    url?: string;
+    params?: Record<string, string>;
+    settleMs?: number;
+    loginAs?: string;
+    viewport?: { width: number; height: number };
+  },
   session: BrowserSession,
   routeAnalyzer: RouteAnalyzer,
   scanner: ComponentScanner,
@@ -143,7 +152,7 @@ export async function inspectRenderedPage(
       if (sawVue) return { framework: "vue", counts: vueCounts };
       return { framework: "unknown", counts: {} };
     });
-  });
+  }, { loginAs: args.loginAs, viewport: args.viewport });
 
   // Match each detected name against the catalog so the agent gets source files.
   const mounted: Array<{ name: string; count: number; relativePath: string; architectureLayer: string }> = [];

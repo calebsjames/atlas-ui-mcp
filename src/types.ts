@@ -70,6 +70,12 @@ export interface BrowserConfig {
    */
   login?: BrowserLoginConfig;
   /**
+   * Further named logins (another role) selected per call with `loginAs`.
+   * Each profile gets its own browser context (cookies/storage) and logs in
+   * once on first use. Same shape and `${ENV_VAR}` interpolation as `login`.
+   */
+  profiles?: Record<string, BrowserLoginConfig>;
+  /**
    * URL patterns (substring, or glob with `*`) whose requests never hold a
    * navigation's quiet window open — app-specific long-polls, analytics
    * beacons, a stream the stream heuristics don't recognise. SSE (by Accept or
@@ -95,7 +101,7 @@ export interface BrowserLoginConfig {
   url: string;
   /** Interactions to authenticate, in order. `text` supports `${ENV_VAR}`. */
   actions: Array<{
-    type: "click" | "fill" | "press" | "select" | "check" | "uncheck" | "hover" | "waitFor";
+    type: "click" | "fill" | "press" | "select" | "check" | "uncheck" | "hover" | "waitFor" | "wait";
     selector?: string;
     text?: string;
     key?: string;

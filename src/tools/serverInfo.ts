@@ -39,7 +39,13 @@ export interface ServerInfo {
   };
   /** Directories under src/ holding source files the catalog does not index (empty = full coverage). */
   unscannedDirs: { dir: string; count: number }[];
-  login: { configured: boolean; loggedIn: boolean; browserLaunched: boolean; error?: string; profiles?: string[] };
+  login: {
+    configured: boolean;
+    loggedIn: boolean;
+    browserLaunched: boolean;
+    error?: string;
+    profiles?: Array<{ name: string; loggedIn: boolean; error?: string }>;
+  };
   devServer: { url: string; reachable: boolean; status?: number; title?: string; error?: string };
   refreshed?: { configReloaded: boolean; ms: number; error?: string };
 }

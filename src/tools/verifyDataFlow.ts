@@ -30,6 +30,8 @@ export async function verifyDataFlow(
     settleMs?: number;
     depth?: number;
     actions?: FlowAction[];
+    loginAs?: string;
+    viewport?: { width: number; height: number };
   },
   session: BrowserSession,
   routeAnalyzer: RouteAnalyzer,
@@ -109,6 +111,8 @@ export async function verifyDataFlow(
 
   const capture = await session.capture(resolved.url, {
     label: `dataflow-${args.name}`,
+    loginAs: args.loginAs,
+    viewport: args.viewport,
     settleMs: args.settleMs ?? 500,
     // Reveal a click-switched section first (if any), then run any caller
     // mutations — all before we read the network, so the section's own fetches

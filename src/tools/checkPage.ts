@@ -15,6 +15,9 @@ export async function checkPage(
     settleMs?: number;
     waitUntil?: WaitUntil;
     public?: boolean;
+    loginAs?: string;
+    viewport?: { width: number; height: number };
+    measure?: string[];
   },
   session: BrowserSession
 ): Promise<McpContentResult> {
@@ -26,6 +29,9 @@ export async function checkPage(
     settleMs: args.settleMs,
     waitUntil: args.waitUntil,
     requireAuth: !args.public,
+    loginAs: args.loginAs,
+    viewport: args.viewport,
+    measure: args.measure,
   });
 
   return captureResponse({ url, ...diagnostics(capture) }, capture);

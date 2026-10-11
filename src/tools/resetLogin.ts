@@ -14,7 +14,7 @@ import type { ToolContext } from "../server/dispatch.js";
  * expired mid-run, or login config landed post-startup.
  */
 export async function resetLogin(
-  args: { relogin?: boolean },
+  args: { relogin?: boolean; loginAs?: string },
   ctx: ToolContext
 ): Promise<{
   reset: true;
@@ -42,7 +42,14 @@ export async function resetLogin(
     // Unreadable config: keep the startup config rather than failing the reset.
   }
 
-  if (!session.loginConfigured) {
+  const configured = args.loginAs
+    ? session.profileNames.includes(args.loginAs)
+    : session.loginConfigured;
+  if (args.loginAs && !configured) {
+    // Let the session produce the "unknown profile — configured: …" error.
+    await session.resetLogin({ relogin: false, loginAs: args.loginAs });
+  }
+  if (!configured) {
     // Nothing to reset toward — surface that plainly rather than silently no-op.
     await session.resetLogin({ relogin: false });
     return {
@@ -58,7 +65,7 @@ export async function resetLogin(
     };
   }
 
-  const result = await session.resetLogin({ relogin });
+  const result = await session.resetLogin({ relogin, loginAs: args.loginAs });
   return {
     reset: true,
     configReloaded,

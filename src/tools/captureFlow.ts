@@ -30,6 +30,8 @@ export interface FlowStep {
   continueOnError?: boolean;
   /** This step's navigation wait strategy (default: the flow's, else "quiet"). */
   waitUntil?: WaitUntil;
+  /** Resize the page before this step (persists for later steps). */
+  viewport?: { width: number; height: number };
 }
 
 /**
@@ -39,7 +41,14 @@ export interface FlowStep {
  * login → fill form → submit → assert-next-screen works as one flow.
  */
 export async function captureFlow(
-  args: { steps: FlowStep[]; settleMs?: number; public?: boolean; waitUntil?: WaitUntil },
+  args: {
+    steps: FlowStep[];
+    settleMs?: number;
+    public?: boolean;
+    waitUntil?: WaitUntil;
+    loginAs?: string;
+    viewport?: { width: number; height: number };
+  },
   session: BrowserSession,
   routeAnalyzer: RouteAnalyzer,
   scanner: ComponentScanner,
@@ -132,6 +141,7 @@ export async function captureFlow(
       noScreenshot: step.noScreenshot,
       continueOnError: step.continueOnError,
       ...(step.waitUntil ? { waitUntil: step.waitUntil } : {}),
+      ...(step.viewport ? { viewport: step.viewport } : {}),
     });
   }
 
@@ -139,6 +149,8 @@ export async function captureFlow(
     settleMs: args.settleMs,
     requireAuth: !args.public,
     waitUntil: args.waitUntil,
+    loginAs: args.loginAs,
+    viewport: args.viewport,
   });
 
   const content: McpContentResult["content"] = [];
@@ -156,6 +168,7 @@ export async function captureFlow(
     requestCount: r.requestCount,
     apiCalls: r.apiCalls,
     ...(r.pendingRequests ? { pendingRequests: r.pendingRequests } : {}),
+    ...(r.measurements ? { measurements: r.measurements } : {}),
     screenshotPath: r.screenshotPath,
   }));
 

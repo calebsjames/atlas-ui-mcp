@@ -9,8 +9,9 @@ const ACTION_ITEM_SCHEMA = {
   properties: {
     type: {
       type: "string",
-      enum: ["click", "fill", "press", "select", "check", "uncheck", "hover", "waitFor"],
-      description: "Interaction kind.",
+      enum: ["click", "fill", "press", "select", "check", "uncheck", "hover", "waitFor", "scroll", "wait", "measure"],
+      description:
+        "Interaction kind. `scroll`: with selector, into view (or by x/y inside that element); without, the page by x/y (neither = to the bottom). `wait`: pause `ms`. `measure` (read-only): bounding box, scroll/client sizes, overflow and computed `properties` of up to 10 matches of `selector`, plus page scroll/overflow — returned in the step's `measurements`.",
     },
     selector: {
       type: "string",
@@ -26,8 +27,36 @@ const ACTION_ITEM_SCHEMA = {
     text: { type: "string", description: "Value to type (fill) or option to choose (select)." },
     key: { type: "string", description: 'Key for press, e.g. "Enter".' },
     timeoutMs: { type: "number", description: "Per-action timeout (default 10000)." },
+    x: { type: "number", description: "scroll: horizontal pixels." },
+    y: { type: "number", description: "scroll: vertical pixels." },
+    ms: { type: "number", description: "wait: milliseconds (default 1000)." },
+    properties: {
+      type: "array",
+      items: { type: "string" },
+      description: 'measure: computed-style properties to read (default display, position, overflow-x/y, z-index, font-size), e.g. ["padding-left", "grid-template-columns"].',
+    },
   },
   required: ["type"],
+};
+
+// Per-call viewport and login identity, shared by every runtime tool.
+const VIEWPORT_SCHEMA = {
+  type: "object",
+  description:
+    'Viewport for THIS call only, e.g. {"width": 375, "height": 812} for a phone breakpoint. The next call gets the configured default.',
+  properties: { width: { type: "number" }, height: { type: "number" } },
+  required: ["width", "height"],
+};
+const LOGIN_AS_SCHEMA = {
+  type: "string",
+  description:
+    "Log in as a named browser.profiles entry from .atlas-ui.json (another role) instead of the default browser.login. Each profile has its own browser context and logs in once.",
+};
+const MEASURE_SCHEMA = {
+  type: "array",
+  items: { type: "string" },
+  description:
+    "Selectors to MEASURE (read-only) after the page settles: bounding box, scroll/client sizes, horizontal overflow, default computed styles; plus page-level horizontal overflow. Returned as `measurements`.",
 };
 
 // How a navigation decides it is done — shared by check_page and capture_flow.
@@ -86,6 +115,9 @@ export const BROWSER_TOOLS = [
           description:
             "Skip the configured login pre-step for this call — use for public routes so a broken/missing credential can't block them (default false).",
         },
+        viewport: VIEWPORT_SCHEMA,
+        loginAs: LOGIN_AS_SCHEMA,
+        measure: MEASURE_SCHEMA,
       },
       required: [],
     },
@@ -93,7 +125,7 @@ export const BROWSER_TOOLS = [
   {
     name: "check_page",
     description:
-      "Navigate to any URL (absolute, or a path relative to the dev server) and return a screenshot plus runtime diagnostics: console errors, uncaught exceptions, and failed network calls. The 'did my change break anything' workhorse — call it after editing to confirm the page still renders clean. Requires the dev server to be running.",
+      "Navigate to any URL (absolute, or a path relative to the dev server) and return a screenshot plus runtime diagnostics: console errors, uncaught exceptions, and failed network calls. Optional per-call `viewport` (responsive checks), `loginAs` (another role from browser.profiles) and `measure` (read-only boxes / overflow / computed styles for selectors). The 'did my change break anything' workhorse — call it after editing to confirm the page still renders clean. Requires the dev server to be running.",
     inputSchema: {
       type: "object",
       properties: {
@@ -116,6 +148,9 @@ export const BROWSER_TOOLS = [
           description:
             'Skip the configured login pre-step for this call — use for public routes (e.g. "/landing") so a broken/missing credential can\'t block them (default false).',
         },
+        viewport: VIEWPORT_SCHEMA,
+        loginAs: LOGIN_AS_SCHEMA,
+        measure: MEASURE_SCHEMA,
       },
       required: ["url"],
     },
@@ -158,6 +193,8 @@ export const BROWSER_TOOLS = [
             "Optional interactions to run after the route loads and BEFORE network traffic is evaluated (e.g. fill a form and click Save to exercise a POST).",
           items: ACTION_ITEM_SCHEMA,
         },
+        viewport: VIEWPORT_SCHEMA,
+        loginAs: LOGIN_AS_SCHEMA,
       },
       required: ["name"],
     },
@@ -165,7 +202,7 @@ export const BROWSER_TOOLS = [
   {
     name: "capture_flow",
     description:
-      "Drive a multi-step user flow against a SINGLE persistent page and screenshot each step. Each step can navigate (component/route/url) and/or run interactions (click, fill, select, press, check, hover, waitFor) — so you can log in, fill a form, submit, and verify the next screen as one flow. State (cookies, form values, SPA route) carries across steps. Each step reports the API calls it triggered ({method, path, status}) so you can confirm a click actually fired its mutation. Aggregates diagnostics into a single pass/fail; on a failed action it screenshots the broken state and stops. Requires the dev server to be running.",
+      "Drive a multi-step user flow against a SINGLE persistent page and screenshot each step. Each step can navigate (component/route/url/section) and/or run interactions (click, fill, select, press, check, hover, waitFor, scroll, wait, and the read-only measure) — so you can log in, fill a form, submit, and verify the next screen as one flow. Each call opens a FRESH page (auth carries over; a previous call's open modal does not); `viewport` and `loginAs` (a browser.profiles role) apply to the whole flow, and a step's `viewport` resizes mid-flow. State (cookies, form values, SPA route) carries across steps. Each step reports the API calls it triggered ({method, path, status}) so you can confirm a click actually fired its mutation. Aggregates diagnostics into a single pass/fail; on a failed action it screenshots the broken state and stops. Requires the dev server to be running.",
     inputSchema: {
       type: "object",
       properties: {
@@ -195,6 +232,7 @@ export const BROWSER_TOOLS = [
               waitUntil: { ...WAIT_UNTIL_SCHEMA, description: "This step's navigation wait strategy (overrides the flow-level waitUntil)." },
               noScreenshot: { type: "boolean", description: "Skip the screenshot for this step." },
               continueOnError: { type: "boolean", description: "Continue the flow even if an action in this step fails." },
+              viewport: { ...VIEWPORT_SCHEMA, description: "Resize the flow's page before this step (persists for later steps)." },
             },
           },
         },
@@ -208,6 +246,8 @@ export const BROWSER_TOOLS = [
           description:
             "Skip the configured login pre-step for the whole flow — use for flows that stay on public routes so a broken/missing credential can't block them (default false).",
         },
+        viewport: VIEWPORT_SCHEMA,
+        loginAs: LOGIN_AS_SCHEMA,
       },
       required: ["steps"],
     },
@@ -223,6 +263,10 @@ export const BROWSER_TOOLS = [
           type: "boolean",
           description:
             "Re-run the login flow immediately after resetting (default true). Set false to just clear state and let the next authed call trigger login.",
+        },
+        loginAs: {
+          type: "string",
+          description: "Reset only this browser.profiles login (default: reset every profile, re-login the default).",
         },
       },
       required: [],
@@ -254,6 +298,8 @@ export const BROWSER_TOOLS = [
           type: "number",
           description: "Extra milliseconds to wait after load before inspecting.",
         },
+        viewport: VIEWPORT_SCHEMA,
+        loginAs: LOGIN_AS_SCHEMA,
       },
       required: [],
     },

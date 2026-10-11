@@ -1,13 +1,14 @@
 import fs from "fs/promises";
 import path from "path";
 import type { Browser, BrowserContext, Page } from "playwright";
-import type { BrowserConfig } from "../types.js";
+import type { BrowserConfig, BrowserLoginConfig } from "../types.js";
 import type {
   CaptureOptions,
   CaptureResult,
   ConsoleEntry,
   FlowAction,
   FlowStepResult,
+  Measurement,
   NetworkEntry,
   ResolvedFlowStep,
 } from "./types.js";
@@ -52,24 +53,46 @@ const DEFAULT_NAV_TIMEOUT_MS = 30_000;
  * imported lazily so the static-analysis tools keep working even if the browser
  * binaries were never installed.
  */
+/**
+ * One login identity: its own BrowserContext (cookies, localStorage,
+ * IndexedDB), its own login state, and the sessionStorage snapshot carried
+ * from one fresh page to the next. "default" is `browser.login`; others come
+ * from `browser.profiles` and are selected per call with `loginAs`.
+ */
+interface Profile {
+  name: string;
+  context: BrowserContext | null;
+  page: Page | null;
+  diag: DiagBuffers | null;
+  loggedIn: boolean;
+  // Set when the login pre-step has failed. Remembered (instead of retrying a
+  // broken credential on every call) and surfaced to authed calls only —
+  // public calls never consult it, so one bad login can't blank all runtime work.
+  loginError: string | null;
+  sessionSnapshot: { origin: string; entries: [string, string][] } | null;
+  /** The URL the last call's page ended on — a flow whose first step has no target reopens it. */
+  lastUrl: string | null;
+}
+
+/** Per-call page options shared by every runtime entry point. */
+export interface PageOptions {
+  requireAuth?: boolean;
+  /** A `browser.profiles` name; omitted = the default `browser.login`. */
+  loginAs?: string;
+  /** Viewport for THIS call's page only (the next call gets the configured default). */
+  viewport?: { width: number; height: number };
+}
+
+const DEFAULT_PROFILE = "default";
+
 export class BrowserSession {
   private browser: Browser | null = null;
-  private context: BrowserContext | null = null;
-  private loggedIn = false;
-  // Set when the login pre-step has failed. We remember it (instead of retrying
-  // a broken credential on every call) and surface it to authed calls only —
-  // public calls never consult it, so one bad login can't blank all runtime work.
-  private loginError: string | null = null;
-  // Each top-level call gets a FRESH page in the one shared context, so a
+  // Each top-level call gets a FRESH page in its profile's context, so a
   // previous call's open modal/overlay can't swallow this call's clicks.
   // Cookies, localStorage and IndexedDB live in the context and carry over;
   // sessionStorage is per-page, so it is snapshotted when a page is retired
   // and seeded into the next (apps keep auth tokens there).
-  private primaryPage: Page | null = null;
-  private primaryDiag: DiagBuffers | null = null;
-  private sessionSnapshot: { origin: string; entries: [string, string][] } | null = null;
-  /** The URL the last call's page ended on — a flow whose first step has no target reopens it. */
-  private lastUrl: string | null = null;
+  private profiles = new Map<string, Profile>();
   private outputDirAbs: string;
   private diagByPage = new WeakMap<Page, DiagBuffers>();
 
@@ -101,8 +124,46 @@ export class BrowserSession {
     return this.config.devServerUrl || "http://localhost:5173";
   }
 
-  private async ensureContext(): Promise<BrowserContext> {
-    if (this.context) return this.context;
+  /** The configured profile names (`browser.profiles`), plus "default" when browser.login is set. */
+  get profileNames(): string[] {
+    return [
+      ...(this.config.login ? [DEFAULT_PROFILE] : []),
+      ...Object.keys(this.config.profiles ?? {}),
+    ];
+  }
+
+  /** The login flow for a profile; throws for a name that isn't configured. */
+  private loginFor(name: string): BrowserLoginConfig | undefined {
+    if (name === DEFAULT_PROFILE) return this.config.login;
+    const login = this.config.profiles?.[name];
+    if (!login) {
+      const known = Object.keys(this.config.profiles ?? {});
+      throw new Error(
+        `Unknown loginAs "${name}". ` +
+          (known.length
+            ? `Configured browser.profiles: ${known.join(", ")}.`
+            : "No browser.profiles are configured in .atlas-ui.json.") +
+          " Omit loginAs for the default browser.login."
+      );
+    }
+    return login;
+  }
+
+  private profile(name = DEFAULT_PROFILE): Profile {
+    this.loginFor(name); // validate
+    let p = this.profiles.get(name);
+    if (!p) {
+      p = {
+        name, context: null, page: null, diag: null, loggedIn: false,
+        loginError: null, sessionSnapshot: null, lastUrl: null,
+      };
+      this.profiles.set(name, p);
+    }
+    return p;
+  }
+
+  private async ensureBrowser(): Promise<Browser> {
+    if (this.browser) return this.browser;
 
     let chromium;
     try {
@@ -125,32 +186,37 @@ export class BrowserSession {
           `Underlying error: ${errMessage(err)}`
       );
     }
+    return this.browser;
+  }
 
-    this.context = await this.browser.newContext({
+  private async ensureContext(p: Profile): Promise<BrowserContext> {
+    if (p.context) return p.context;
+    const browser = await this.ensureBrowser();
+    p.context = await browser.newContext({
       viewport: this.config.viewport || { width: 1280, height: 800 },
     });
-
-    return this.context;
+    return p.context;
   }
 
   /**
-   * Return the shared page, creating it (with listeners attached once) on first
-   * use. Page creation does not trigger login — that's demand-driven via
-   * `requireAuth`, so a public call always gets a usable page even when the
-   * configured credential is broken. When `requireAuth` is set, the login
-   * pre-step runs (once) before returning, and its storage-based auth persists
-   * to every later navigation on this same page.
+   * A fresh page for this call, in the requested profile's context. Page
+   * creation does not trigger login — that's demand-driven via `requireAuth`,
+   * so a public call always gets a usable page even when the configured
+   * credential is broken. When `requireAuth` is set, the profile's login
+   * pre-step runs (once per profile) before returning.
    */
   private async ensurePage(
-    opts: { requireAuth?: boolean } = {}
-  ): Promise<{ page: Page; diag: DiagBuffers }> {
-    const context = await this.ensureContext();
-    await this.retirePage();
+    opts: PageOptions = {}
+  ): Promise<{ page: Page; diag: DiagBuffers; profile: Profile }> {
+    const p = this.profile(opts.loginAs);
+    const context = await this.ensureContext(p);
+    await this.retirePage(p);
 
     const page = await context.newPage();
-    this.primaryDiag = this.attach(page);
-    this.primaryPage = page;
-    if (this.sessionSnapshot) {
+    p.diag = this.attach(page);
+    p.page = page;
+    if (opts.viewport) await page.setViewportSize(opts.viewport);
+    if (p.sessionSnapshot) {
       // Seed only an EMPTY sessionStorage on the app's origin, so later
       // navigations in this page keep whatever the app wrote meanwhile.
       await page.addInitScript((snap: { origin: string; entries: [string, string][] }) => {
@@ -160,61 +226,62 @@ export class BrowserSession {
         } catch {
           /* storage blocked — nothing to seed */
         }
-      }, this.sessionSnapshot);
+      }, p.sessionSnapshot);
     }
 
-    if (opts.requireAuth) {
-      await this.ensureLoggedIn();
+    if (opts.requireAuth || opts.loginAs) {
+      await this.ensureLoggedIn(p);
     }
 
-    return { page, diag: this.primaryDiag };
+    return { page, diag: p.diag, profile: p };
   }
 
-  /** Snapshot the current page's sessionStorage + URL, then close it. */
-  private async retirePage(): Promise<void> {
-    const page = this.primaryPage;
-    this.primaryPage = null;
-    this.primaryDiag = null;
+  /** Snapshot the profile's current page's sessionStorage + URL, then close it. */
+  private async retirePage(p: Profile): Promise<void> {
+    const page = p.page;
+    p.page = null;
+    p.diag = null;
     if (!page || page.isClosed()) return;
-    await this.snapshotSession(page);
+    await this.snapshotSession(p, page);
     await page.close().catch(() => {});
   }
 
-  private async snapshotSession(page: Page): Promise<void> {
+  private async snapshotSession(p: Profile, page: Page): Promise<void> {
     try {
       const url = page.url();
-      if (/^https?:/.test(url)) this.lastUrl = url;
+      if (/^https?:/.test(url)) p.lastUrl = url;
       const origin = new URL(url).origin;
       if (origin !== new URL(this.baseUrl).origin) return;
       const entries = await page.evaluate(() => Object.entries(sessionStorage) as [string, string][]);
-      this.sessionSnapshot = { origin, entries };
+      p.sessionSnapshot = { origin, entries };
     } catch {
       /* about:blank, closed, or cross-origin — keep the previous snapshot */
     }
   }
 
   /**
-   * Run the login pre-step once, on demand. On failure we deliberately DON'T
-   * tear the browser down — that would blank public routes too. Instead we
-   * remember the error and throw only for this authed call, so public checks
-   * keep working and reset_login can retry a fixed credential without a restart.
+   * Run the profile's login pre-step once, on demand. On failure we
+   * deliberately DON'T tear the browser down — that would blank public routes
+   * too. Instead we remember the error and throw only for this authed call, so
+   * public checks keep working and reset_login can retry a fixed credential.
    */
-  private async ensureLoggedIn(): Promise<void> {
-    if (this.loggedIn || !this.config.login) return;
-    if (this.loginError) {
+  private async ensureLoggedIn(p: Profile): Promise<void> {
+    const login = this.loginFor(p.name);
+    if (p.loggedIn || !login) return;
+    if (p.loginError) {
       throw new Error(
-        `Login is unavailable: ${this.loginError} ` +
-          `Fix browser.login/credentials and call reset_login to retry. ` +
-          `Public routes are still checkable — pass "public": true to skip login.`
+        `Login${p.name === DEFAULT_PROFILE ? "" : ` as "${p.name}"`} is unavailable: ${p.loginError} ` +
+          `Fix browser.${p.name === DEFAULT_PROFILE ? "login" : `profiles.${p.name}`}/credentials and call ` +
+          `reset_login to retry. Public routes are still checkable — pass "public": true to skip login.`
       );
     }
     try {
-      await this.performLogin(this.primaryPage!);
-      this.loggedIn = true;
+      await this.performLogin(p.page!, login);
+      p.loggedIn = true;
       // The token the login wrote to sessionStorage must reach later pages.
-      await this.snapshotSession(this.primaryPage!);
+      await this.snapshotSession(p, p.page!);
     } catch (err) {
-      this.loginError = errMessage(err);
+      p.loginError = errMessage(err);
       throw err;
     }
   }
@@ -224,52 +291,65 @@ export class BrowserSession {
     return !!this.config.login;
   }
 
-  /** Login state for server_info: configured, logged in, or stuck on an error. */
-  loginState(): { configured: boolean; loggedIn: boolean; browserLaunched: boolean; error?: string } {
+  /** Login state for server_info: configured, logged in, or stuck on an error — per profile. */
+  loginState(): {
+    configured: boolean;
+    loggedIn: boolean;
+    browserLaunched: boolean;
+    error?: string;
+    profiles?: Array<{ name: string; loggedIn: boolean; error?: string }>;
+  } {
+    const d = this.profiles.get(DEFAULT_PROFILE);
+    const named = Object.keys(this.config.profiles ?? {}).map((name) => {
+      const p = this.profiles.get(name);
+      return { name, loggedIn: !!p?.loggedIn, ...(p?.loginError ? { error: p.loginError } : {}) };
+    });
     return {
       configured: !!this.config.login,
-      loggedIn: this.loggedIn,
+      loggedIn: !!d?.loggedIn,
       browserLaunched: !!this.browser,
-      ...(this.loginError ? { error: this.loginError } : {}),
+      ...(d?.loginError ? { error: d.loginError } : {}),
+      ...(named.length ? { profiles: named } : {}),
     };
   }
 
   /**
-   * Force-reset the auth session: drop the page AND context (clearing cookies +
-   * storage), clear a stuck login error, then — if `relogin` — run the login
-   * flow again immediately. The in-session equivalent of restarting the server
-   * to recover a broken/expired login, without losing the browser process.
+   * Force-reset auth: drop the page AND context (clearing cookies + storage)
+   * of one profile (`loginAs`) or of every profile, clear a stuck login error,
+   * then — if `relogin` — run that login flow again immediately. The in-session
+   * equivalent of restarting the server, without losing the browser process.
    */
-  async resetLogin(opts: { relogin?: boolean } = {}): Promise<{ loggedIn: boolean; error?: string }> {
-    await this.primaryPage?.close().catch(() => {});
-    await this.context?.close().catch(() => {});
-    this.primaryPage = null;
-    this.primaryDiag = null;
-    this.context = null;
-    this.loggedIn = false;
-    this.loginError = null;
-    this.sessionSnapshot = null;
-    this.lastUrl = null;
+  async resetLogin(opts: { relogin?: boolean; loginAs?: string } = {}): Promise<{ loggedIn: boolean; error?: string }> {
+    const names = opts.loginAs ? [opts.loginAs] : [...this.profiles.keys()];
+    if (opts.loginAs) this.loginFor(opts.loginAs); // validate before tearing anything down
+    for (const name of names) {
+      const p = this.profiles.get(name);
+      if (!p) continue;
+      await p.page?.close().catch(() => {});
+      await p.context?.close().catch(() => {});
+      this.profiles.delete(name);
+    }
 
-    if (!this.config.login) return { loggedIn: false };
+    const target = opts.loginAs ?? DEFAULT_PROFILE;
+    if (!this.loginFor(target)) return { loggedIn: false };
 
     if (opts.relogin) {
       try {
-        await this.ensurePage({ requireAuth: true });
-        return { loggedIn: this.loggedIn };
+        const { profile } = await this.ensurePage({ requireAuth: true, loginAs: opts.loginAs });
+        return { loggedIn: profile.loggedIn };
       } catch {
-        return { loggedIn: false, error: this.loginError ?? "login failed" };
+        const p = this.profiles.get(target);
+        return { loggedIn: false, error: p?.loginError ?? "login failed" };
       }
     }
-    return { loggedIn: this.loggedIn };
+    return { loggedIn: false };
   }
 
   /**
-   * Run the configured login flow on the shared page. A success check (selector
-   * or URL) keeps us from proceeding before the auth round-trip persists.
+   * Run a login flow on `page`. A success check (selector or URL) keeps us
+   * from proceeding before the auth round-trip persists.
    */
-  private async performLogin(page: Page): Promise<void> {
-    const login = this.config.login!;
+  private async performLogin(page: Page, login: BrowserLoginConfig): Promise<void> {
     const url = toAbsoluteUrl(this.baseUrl, login.url);
     try {
       await this.navigate(page, url, "quiet");
@@ -297,7 +377,11 @@ export class BrowserSession {
    * (console errors/warnings, uncaught exceptions, failed + all network requests).
    */
   async capture(url: string, opts: CaptureOptions = {}): Promise<CaptureResult> {
-    const { page, diag } = await this.ensurePage({ requireAuth: opts.requireAuth !== false });
+    const { page, diag } = await this.ensurePage({
+      requireAuth: opts.requireAuth !== false,
+      loginAs: opts.loginAs,
+      viewport: opts.viewport,
+    });
 
     // Record buffer positions so we report only THIS call's diagnostics, not
     // everything accumulated on the shared page since login.
@@ -319,9 +403,11 @@ export class BrowserSession {
     // still captures whatever state was reached.
     const performed: string[] = [];
     let actionError: string | undefined;
+    const measurements: Measurement[] = [];
     for (const action of opts.actions || []) {
       try {
-        await runAction(page, action);
+        const out = await runAction(page, action);
+        if (out) measurements.push(out);
         performed.push(describeAction(action));
       } catch (err) {
         actionError = errMessage(err);
@@ -334,6 +420,15 @@ export class BrowserSession {
     }
 
     if (opts.settleMs) await page.waitForTimeout(opts.settleMs);
+    // Read-only measurements requested for the settled page (check_page / render_component `measure`).
+    for (const selector of opts.measure ?? []) {
+      const out = await runAction(page, { type: "measure", selector }).catch((err) => {
+        actionError ??= `measure ${selector}: ${errMessage(err)}`;
+        return undefined;
+      });
+      if (out) measurements.push(out);
+    }
+    const viewport = page.viewportSize() ?? undefined;
 
     const screenshotPath = await this.screenshotFile(opts.label || "capture");
     const buffer = await page.screenshot({
@@ -366,6 +461,8 @@ export class BrowserSession {
       performed,
       actionError,
       ...(pendingRequests?.length ? { pendingRequests } : {}),
+      ...(measurements.length ? { measurements } : {}),
+      ...(viewport ? { viewport } : {}),
       clean:
         consoleErrors.length === 0 &&
         pageErrors.length === 0 &&
@@ -439,9 +536,9 @@ export class BrowserSession {
    */
   async withPage<T>(
     fn: (page: Page) => Promise<T>,
-    opts: { requireAuth?: boolean } = {}
+    opts: PageOptions = {}
   ): Promise<T> {
-    const { page } = await this.ensurePage({ requireAuth: opts.requireAuth !== false });
+    const { page } = await this.ensurePage({ ...opts, requireAuth: opts.requireAuth !== false });
     return fn(page);
   }
 
@@ -454,24 +551,28 @@ export class BrowserSession {
    */
   async runFlow(
     steps: ResolvedFlowStep[],
-    opts: { settleMs?: number; requireAuth?: boolean; waitUntil?: WaitUntil } = {}
+    opts: { settleMs?: number; waitUntil?: WaitUntil } & PageOptions = {}
   ): Promise<FlowStepResult[]> {
-    // Reuse the shared page so a configured login pre-step (and any prior tool
-    // state) carries into the flow. Pass requireAuth:false for a public flow.
-    const { page, diag } = await this.ensurePage({ requireAuth: opts.requireAuth !== false });
+    // One fresh page for the whole flow, logged in as the requested profile
+    // (requireAuth:false for a public flow). Steps share it.
+    const { page, diag, profile } = await this.ensurePage({
+      requireAuth: opts.requireAuth !== false,
+      loginAs: opts.loginAs,
+      viewport: opts.viewport,
+    });
     const results: FlowStepResult[] = [];
 
     // The page is fresh. A flow that starts by acting "on the current page"
     // reopens the previous call's URL — from a clean load, so its in-page
     // state (an open modal, a typed-in form) is NOT carried over.
     if (steps.length && !steps[0].url) {
-      if (!this.lastUrl) {
+      if (!profile.lastUrl) {
         throw new Error(
           "The first step has no navigation target and there is no previous page to act on — " +
             "give it a component, route or url."
         );
       }
-      steps = [{ ...steps[0], url: this.lastUrl, reopened: true }, ...steps.slice(1)];
+      steps = [{ ...steps[0], url: profile.lastUrl, reopened: true }, ...steps.slice(1)];
     }
 
     for (let i = 0; i < steps.length; i++) {
@@ -499,7 +600,9 @@ export class BrowserSession {
     let pendingRequests: string[] | undefined;
     const waitUntil = step.waitUntil ?? defaultWaitUntil ?? "quiet";
 
+    const measurements: Measurement[] = [];
     try {
+      if (step.viewport) await page.setViewportSize(step.viewport);
       if (step.url) {
         pendingRequests = await this.navigate(page, step.url, waitUntil);
         performed.push(
@@ -509,7 +612,8 @@ export class BrowserSession {
         );
       }
       for (const action of step.actions || []) {
-        await runAction(page, action);
+        const out = await runAction(page, action);
+        if (out) measurements.push(out);
         performed.push(describeAction(action));
       }
       if (step.actions?.length && waitUntil === "quiet") {
@@ -551,6 +655,7 @@ export class BrowserSession {
       failedRequests,
       requestCount: diag.requests.length - mark.rq,
       ...(pendingRequests?.length ? { pendingRequests } : {}),
+      ...(measurements.length ? { measurements } : {}),
       // API calls made during THIS step only — the buffer slice since `mark`.
       apiCalls: toApiCalls(diag.requests.slice(mark.rq)),
       clean:
@@ -699,17 +804,13 @@ export class BrowserSession {
   }
 
   async close(): Promise<void> {
-    this.sessionSnapshot = null;
-    this.lastUrl = null;
-    await this.primaryPage?.close().catch(() => {});
-    await this.context?.close().catch(() => {});
+    for (const p of this.profiles.values()) {
+      await p.page?.close().catch(() => {});
+      await p.context?.close().catch(() => {});
+    }
+    this.profiles.clear();
     await this.browser?.close().catch(() => {});
-    this.primaryPage = null;
-    this.primaryDiag = null;
-    this.context = null;
     this.browser = null;
-    this.loggedIn = false;
-    this.loginError = null;
   }
 }
 

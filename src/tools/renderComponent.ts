@@ -21,6 +21,9 @@ export async function renderComponent(
     settleMs?: number;
     public?: boolean;
     file?: string;
+    loginAs?: string;
+    viewport?: { width: number; height: number };
+    measure?: string[];
   },
   session: BrowserSession,
   routeAnalyzer: RouteAnalyzer,
@@ -48,6 +51,9 @@ export async function renderComponent(
     fullPage: args.fullPage,
     settleMs: args.settleMs,
     requireAuth: !args.public,
+    loginAs: args.loginAs,
+    viewport: args.viewport,
+    measure: args.measure,
     // Reveal a click-switched section (if any) after load, before the screenshot.
     actions: resolved.revealActions,
   });

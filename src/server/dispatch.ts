@@ -172,6 +172,9 @@ const HANDLERS: Record<string, ToolHandler> = {
         settleMs: args?.settleMs as number | undefined,
         public: args?.public as boolean | undefined,
         file: args?.file as string | undefined,
+        loginAs: args?.loginAs as string | undefined,
+        viewport: args?.viewport as { width: number; height: number } | undefined,
+        measure: args?.measure as string[] | undefined,
       },
       ctx.browser, ctx.routeAnalyzer, ctx.scanner, ctx.cache, ctx.browserConfig
     ),
@@ -184,6 +187,9 @@ const HANDLERS: Record<string, ToolHandler> = {
         settleMs: args?.settleMs as number | undefined,
         waitUntil: args?.waitUntil as WaitUntil | undefined,
         public: args?.public as boolean | undefined,
+        loginAs: args?.loginAs as string | undefined,
+        viewport: args?.viewport as { width: number; height: number } | undefined,
+        measure: args?.measure as string[] | undefined,
       },
       ctx.browser
     ),
@@ -198,6 +204,8 @@ const HANDLERS: Record<string, ToolHandler> = {
         settleMs: args?.settleMs as number | undefined,
         depth: args?.depth as number | undefined,
         actions: args?.actions as any[] | undefined,
+        loginAs: args?.loginAs as string | undefined,
+        viewport: args?.viewport as { width: number; height: number } | undefined,
       },
       ctx.browser, ctx.routeAnalyzer, ctx.scanner, ctx.cache, ctx.browserConfig
     ),
@@ -209,12 +217,17 @@ const HANDLERS: Record<string, ToolHandler> = {
         settleMs: args?.settleMs as number | undefined,
         waitUntil: args?.waitUntil as WaitUntil | undefined,
         public: args?.public as boolean | undefined,
+        loginAs: args?.loginAs as string | undefined,
+        viewport: args?.viewport as { width: number; height: number } | undefined,
       },
       ctx.browser, ctx.routeAnalyzer, ctx.scanner, ctx.cache, ctx.browserConfig
     ),
 
   reset_login: (args, ctx) =>
-    resetLogin({ relogin: args?.relogin as boolean | undefined }, ctx),
+    resetLogin(
+      { relogin: args?.relogin as boolean | undefined, loginAs: args?.loginAs as string | undefined },
+      ctx
+    ),
 
   inspect_rendered_page: (args, ctx) =>
     inspectRenderedPage(
@@ -225,6 +238,8 @@ const HANDLERS: Record<string, ToolHandler> = {
         url: args?.url as string | undefined,
         params: args?.params as Record<string, string> | undefined,
         settleMs: args?.settleMs as number | undefined,
+        loginAs: args?.loginAs as string | undefined,
+        viewport: args?.viewport as { width: number; height: number } | undefined,
       },
       ctx.browser, ctx.routeAnalyzer, ctx.scanner, ctx.cache, ctx.browserConfig
     ),

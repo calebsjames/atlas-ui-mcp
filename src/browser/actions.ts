@@ -1,14 +1,23 @@
 import type { Locator, Page } from "playwright";
-import type { ApiCall, FlowAction, NetworkEntry } from "./types.js";
+import type { ApiCall, FlowAction, Measurement, NetworkEntry } from "./types.js";
 import { isApiRequest } from "./network.js";
 
-/** Execute one interaction. Throws (with Playwright's message) if it can't. */
-export async function runAction(page: Page, a: FlowAction): Promise<void> {
+/**
+ * Execute one interaction. Throws (with Playwright's message) if it can't.
+ * Returns a Measurement for the read-only `measure` action, else nothing.
+ */
+export async function runAction(page: Page, a: FlowAction): Promise<Measurement | undefined> {
   const timeout = a.timeoutMs ?? 10_000;
   const need = (v: string | undefined, field: string): string => {
     if (!v) throw new Error(`Action "${a.type}" requires a ${field}.`);
     return v;
   };
+
+  if (a.type === "wait") {
+    await page.waitForTimeout(a.ms ?? a.timeoutMs ?? 1000);
+    return;
+  }
+  if (a.type === "measure") return measure(page, need(a.selector, "selector"), a.properties);
 
   // Selector-less variants never resolve a target.
   if (!a.selector && !a.within) {
@@ -18,6 +27,14 @@ export async function runAction(page: Page, a: FlowAction): Promise<void> {
     }
     if (a.type === "waitFor") {
       await page.waitForTimeout(a.timeoutMs ?? 1000);
+      return;
+    }
+    if (a.type === "scroll") {
+      // By (x, y); with neither, to the bottom of the page.
+      await page.evaluate(({ x, y }) => {
+        if (x == null && y == null) window.scrollTo(0, document.documentElement.scrollHeight);
+        else window.scrollBy(x ?? 0, y ?? 0);
+      }, { x: a.x, y: a.y });
       return;
     }
   }
@@ -60,6 +77,11 @@ export async function runAction(page: Page, a: FlowAction): Promise<void> {
         return;
       case "waitFor":
         await target.waitFor({ timeout });
+        return;
+      case "scroll":
+        // Into view; with x/y, scroll that element's own content by (x, y).
+        if (a.x == null && a.y == null) await target.scrollIntoViewIfNeeded({ timeout });
+        else await target.evaluate((el, d) => el.scrollBy(d.x ?? 0, d.y ?? 0), { x: a.x, y: a.y });
         return;
       default:
         throw new Error(`Unknown action type: ${(a as FlowAction).type}`);
@@ -105,6 +127,48 @@ function scopedTarget(page: Page, selector: string, within: string) {
   return page.locator(`${container}:not(:has(${container}))`).locator(selector);
 }
 
+const DEFAULT_MEASURE_STYLES = ["display", "position", "overflow-x", "overflow-y", "z-index", "font-size"];
+const MAX_MEASURED = 10;
+
+/**
+ * Read-only geometry + computed styles for every element matching `selector`
+ * (first 10), plus page-level scroll/overflow context. Never mutates the page.
+ */
+async function measure(page: Page, selector: string, properties?: string[]): Promise<Measurement> {
+  const props = properties?.length ? properties : DEFAULT_MEASURE_STYLES;
+  const loc = page.locator(selector);
+  const count = await loc.count();
+  const elements: Measurement["elements"] = [];
+  for (let i = 0; i < Math.min(count, MAX_MEASURED); i++) {
+    elements.push(
+      await loc.nth(i).evaluate((el, ps) => {
+        const r = el.getBoundingClientRect();
+        const cs = getComputedStyle(el);
+        const styles: Record<string, string> = {};
+        for (const p of ps) styles[p] = cs.getPropertyValue(p);
+        const round = (n: number) => Math.round(n * 10) / 10;
+        return {
+          x: round(r.x), y: round(r.y), width: round(r.width), height: round(r.height),
+          visible: r.width > 0 && r.height > 0 && cs.visibility !== "hidden" && cs.display !== "none",
+          scrollWidth: el.scrollWidth, scrollHeight: el.scrollHeight,
+          clientWidth: el.clientWidth, clientHeight: el.clientHeight,
+          overflowsX: el.scrollWidth > el.clientWidth + 1,
+          styles,
+        };
+      }, props)
+    );
+  }
+  const pageInfo = await page.evaluate(() => ({
+    viewportWidth: innerWidth,
+    viewportHeight: innerHeight,
+    scrollX: Math.round(scrollX),
+    scrollY: Math.round(scrollY),
+    scrollWidth: document.documentElement.scrollWidth,
+    horizontalOverflow: document.documentElement.scrollWidth > innerWidth,
+  }));
+  return { selector, count, elements, page: pageInfo };
+}
+
 /** One-line, secret-safe description of an action for the report. */
 export function describeAction(a: FlowAction): string {
   const scope = a.within ? ` within "${a.within}"` : "";
@@ -118,6 +182,18 @@ export function describeAction(a: FlowAction): string {
       return a.selector ? `pressed ${a.key} on ${a.selector}${scope}` : `pressed ${a.key}`;
     case "waitFor":
       return a.selector ? `waited for ${a.selector}${scope}` : `waited ${a.timeoutMs ?? 1000}ms`;
+    case "wait":
+      return `waited ${a.ms ?? a.timeoutMs ?? 1000}ms`;
+    case "scroll":
+      return a.selector
+        ? a.x == null && a.y == null
+          ? `scrolled ${a.selector}${scope} into view`
+          : `scrolled ${a.selector}${scope} by (${a.x ?? 0}, ${a.y ?? 0})`
+        : a.x == null && a.y == null
+          ? "scrolled to the bottom"
+          : `scrolled the page by (${a.x ?? 0}, ${a.y ?? 0})`;
+    case "measure":
+      return `measured ${a.selector}`;
     default:
       return `${a.type} ${a.selector ?? ""}${scope}`.trim();
   }
