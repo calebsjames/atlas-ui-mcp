@@ -6,8 +6,9 @@ import {
   ensureCatalog,
   isAmbiguousMatch,
   nameNotFound,
-  resolveByName,
+  resolveName,
   symbolMatch,
+  type AlsoMatched,
   type NameNotFound,
   type SymbolMatch,
 } from "./shared.js";
@@ -17,6 +18,8 @@ export interface ComponentDetail extends Component, SymbolMatch {
   props?: ComponentProps;
   /** Declaration form of a secondary export (function, variable, class, …). */
   declarationKind?: string;
+  /** Other catalog nodes the name matched; this answer auto-picked one (see resolveName). */
+  alsoMatched?: AlsoMatched[];
 }
 
 const FILE_LEVEL =
@@ -41,12 +44,13 @@ export async function getComponentDetail(
   const { name, file } = args;
   await ensureCatalog(scanner, cache);
 
-  const resolved = resolveByName(cache.getByName(name), name, file);
+  const resolved = resolveName(cache.getByName(name), name, file, { preferRenderable: true });
   if (resolved === null) return nameNotFound(name, cache);
   if (isAmbiguousMatch(resolved)) return resolved;
 
-  const component = resolved;
-  const sym = symbolMatch(component, name, FILE_LEVEL);
+  const component = resolved.node;
+  const also = resolved.alsoMatched ? { alsoMatched: resolved.alsoMatched } : {};
+  const sym = { ...symbolMatch(component, name, FILE_LEVEL), ...also };
 
   if (!sym.isPrimaryExport && sym.matchedExport) {
     // Answer about the SYMBOL: its own line/JSDoc, not the primary export's.

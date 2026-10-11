@@ -367,12 +367,54 @@ export function resolveByName(
   name: string,
   file?: string
 ): Component | AmbiguousMatch | null {
+  const r = resolveName(matches, name, file);
+  if (r === null || isAmbiguousMatch(r)) return r;
+  return r.node;
+}
+
+/** Another catalog node the name also matched, reported beside an auto-picked answer. */
+export interface AlsoMatched {
+  name: string;
+  relativePath: string;
+  architectureLayer: ArchitectureLayer;
+}
+
+/**
+ * resolveByName with the ranking surfaced. Among several FILES matching the
+ * name (after the optional `file` filter):
+ *   1. a single node whose PRIMARY name equals the query exactly (case
+ *      included) wins over alias / case-insensitive matches — `ShotDataTable`
+ *      the component beats `src/types/shotDataTable.ts`'s camelCase alias;
+ *   2. with `preferRenderable` (component-oriented tools), a single
+ *      component/page/context candidate wins;
+ *   3. otherwise the caller gets an AmbiguousMatch.
+ * The losers come back as `alsoMatched` so an auto-pick is never silent.
+ */
+export function resolveName(
+  matches: Component[],
+  name: string,
+  file?: string,
+  opts: { preferRenderable?: boolean } = {}
+): { node: Component; alsoMatched?: AlsoMatched[] } | AmbiguousMatch | null {
   matches = dedupeByPath(matches);
   if (matches.length === 0) return null;
-  if (matches.length === 1) return matches[0];
+  if (matches.length === 1) return { node: matches[0] };
 
   const filtered = filterByFile(matches, file);
-  if (filtered.length === 1) return filtered[0];
+  if (filtered.length === 1) return { node: filtered[0] };
   if (filtered.length === 0) return ambiguousResult(name, matches);
+
+  const pick = (node: Component) => ({
+    node,
+    alsoMatched: filtered
+      .filter((c) => c !== node)
+      .map((c) => ({ name: c.name, relativePath: c.relativePath, architectureLayer: c.architectureLayer })),
+  });
+  const exact = filtered.filter((c) => c.name === name);
+  if (exact.length === 1) return pick(exact[0]);
+  if (opts.preferRenderable) {
+    const renderable = filtered.filter((c) => RENDERABLE_LAYERS.includes(c.architectureLayer));
+    if (renderable.length === 1) return pick(renderable[0]);
+  }
   return ambiguousResult(name, filtered);
 }

@@ -5,8 +5,9 @@ import {
   ensureCatalog,
   isAmbiguousMatch,
   nameNotFound,
-  resolveByName,
+  resolveName,
   symbolMatch,
+  type AlsoMatched,
   type NameNotFound,
   type SymbolMatch,
 } from "./shared.js";
@@ -21,6 +22,8 @@ export interface DependencyNode {
 
 export interface DependencyChain extends Partial<SymbolMatch> {
   target: DependencyNode;
+  /** Other catalog nodes the name matched; an exact-case primary name was picked. */
+  alsoMatched?: AlsoMatched[];
   dependsOn: DependencyNode[];
   usedBy: DependencyNode[];
 }
@@ -38,11 +41,11 @@ export async function getDependencyChain(
 ): Promise<DependencyChain | AmbiguousMatch | NameNotFound> {
   await ensureCatalog(scanner, cache);
 
-  const resolved = resolveByName(cache.getByName(args.name), args.name, args.file);
+  const resolved = resolveName(cache.getByName(args.name), args.name, args.file);
   if (resolved === null) return nameNotFound(args.name, cache);
   if (isAmbiguousMatch(resolved)) return resolved;
 
-  const target = resolved;
+  const target = resolved.node;
   const depth = Math.min(Math.max(args.depth || 1, 1), 3);
 
   const targetNode: DependencyNode = {
@@ -71,6 +74,7 @@ export async function getDependencyChain(
   return {
     target: targetNode,
     ...(sym.isPrimaryExport ? { isPrimaryExport: true } : sym),
+    ...(resolved.alsoMatched ? { alsoMatched: resolved.alsoMatched } : {}),
     dependsOn,
     usedBy,
   };

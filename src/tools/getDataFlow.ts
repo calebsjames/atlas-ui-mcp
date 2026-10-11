@@ -6,8 +6,9 @@ import {
   findByLayers,
   isAmbiguousMatch,
   nameNotFound,
-  resolveByName,
+  resolveName,
   RENDERABLE_LAYERS,
+  type AlsoMatched,
   symbolMatch,
   type NameNotFound,
   type SymbolMatch,
@@ -45,6 +46,8 @@ export interface DataFlowResult extends Partial<SymbolMatch> {
   target: string;
   /** Endpoints the matched secondary export itself owns, when attributable. */
   symbolEndpoints?: string[];
+  /** Other catalog nodes the name matched; this trace auto-picked one. */
+  alsoMatched?: AlsoMatched[];
   chains: DataFlowChain[];
   /** Union of every endpoint reachable from rendering the target (incl. children). */
   allEndpoints: string[];
@@ -79,9 +82,12 @@ export async function getDataFlow(
   // Colliding names are a real footgun here: tracing the wrong "Header" gives a
   // confident but wrong endpoint prediction. Narrow by `file` when we can; if
   // that leaves the choice open, say so instead of guessing.
-  const target = resolveByName(cache.getByName(args.name), args.name, args.file);
-  if (target === null) return nameNotFound(args.name, cache);
-  if (isAmbiguousMatch(target)) return target;
+  const resolved = resolveName(cache.getByName(args.name), args.name, args.file, {
+    preferRenderable: true,
+  });
+  if (resolved === null) return nameNotFound(args.name, cache);
+  if (isAmbiguousMatch(resolved)) return resolved;
+  const target = resolved.node;
 
   const maxDepth = Math.max(0, args.depth ?? DEFAULT_DEPTH);
   const chains: DataFlowChain[] = [];
@@ -159,6 +165,7 @@ export async function getDataFlow(
     target: sym.matchedExport ?? target.name,
     ...(sym.isPrimaryExport ? {} : sym),
     ...(symbolEndpoints?.length ? { symbolEndpoints } : {}),
+    ...(resolved.alsoMatched ? { alsoMatched: resolved.alsoMatched } : {}),
     chains: uniqueChains,
     allEndpoints,
     depth: maxDepth,

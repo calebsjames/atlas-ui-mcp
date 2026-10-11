@@ -8,8 +8,9 @@ import {
   ensureCatalog,
   isAmbiguousMatch,
   nameNotFound,
-  resolveByName,
+  resolveName,
   symbolMatch,
+  type AlsoMatched,
   type NameNotFound,
   type SymbolMatch,
 } from "./shared.js";
@@ -31,7 +32,7 @@ export async function getComponentProps(
   cache: CacheManager,
   scanner: ComponentScanner
 ): Promise<
-  | ((ComponentProps | { error: string }) & Partial<SymbolMatch>)
+  | ((ComponentProps | { error: string }) & Partial<SymbolMatch> & { alsoMatched?: AlsoMatched[] })
   | AmbiguousMatch
   | NameNotFound
 > {
@@ -50,16 +51,18 @@ export async function getComponentProps(
 
   if (args.name) {
     await ensureCatalog(scanner, cache);
-    const resolved = resolveByName(cache.getByName(args.name), args.name, args.file);
-    if (resolved === null) return nameNotFound(args.name, cache);
-    if (isAmbiguousMatch(resolved)) return resolved;
+    const r = resolveName(cache.getByName(args.name), args.name, args.file, { preferRenderable: true });
+    if (r === null) return nameNotFound(args.name, cache);
+    if (isAmbiguousMatch(r)) return r;
+    const resolved = r.node;
     const sym = symbolMatch(
       resolved,
       args.name,
       "Props are the declared interface of the file's component, not of this export."
     );
     const props = await parseProps(resolved.path, resolved.relativePath, "", parser, cache);
-    return sym.isPrimaryExport ? props : { ...props, ...sym };
+    const also = r.alsoMatched ? { alsoMatched: r.alsoMatched } : {};
+    return sym.isPrimaryExport ? { ...props, ...also } : { ...props, ...sym, ...also };
   }
 
   throw new Error(

@@ -122,6 +122,7 @@ export async function verifyDataFlow(
   return captureResponse(
     {
       target: args.name,
+      ...(flow.alsoMatched ? { alsoMatched: flow.alsoMatched } : {}),
       route: resolved.routePath,
       url: resolved.url,
       ...(resolved.viewSection ? { viewSection: resolved.viewSection } : {}),
