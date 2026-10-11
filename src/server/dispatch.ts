@@ -103,7 +103,7 @@ const HANDLERS: Record<string, ToolHandler> = {
 
   find_component_usages: (args, ctx) =>
     findComponentUsages(
-      { name: requireStringArg(args, "name") },
+      { name: requireStringArg(args, "name"), file: args?.file as string | undefined },
       ctx.scanner, ctx.cache, ctx.workspaceRoot, ctx.config
     ),
 

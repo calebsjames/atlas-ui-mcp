@@ -171,7 +171,8 @@ export const CATALOG_TOOLS = [
     description:
       "Find where ANY exported symbol is used across the codebase — a component mounted in a template/JSX, a hook/composable called, or a plain exported function (DTO predicates, utils) called. Works for symbols that are not the primary export of their file. Returns { symbol, resolution, externalUsageCount, selfModuleUsageCount, usages, siblingExports?, suggestions?, caveats }. " +
       "`resolution.status` distinguishes `indexed` / `indexed-as-export` (the symbol exists — an empty usages list is a real 'unused') from `not-in-catalog` (the lookup missed; `suggestions` lists near-matches). Each usage has file, parent item, line, and usageType `template` | `jsx` | `import` | `call`; usages inside the declaring module are marked `scope: \"self-module\"`. " +
-      "PROPS AT THE MOUNT SITE (Vue SFCs): each template usage carries `staticProps` (literal values actually passed, e.g. scope=\"all\"), `boundProps` / `vModelProps` (the expression SOURCE for `:prop=\"x\"` — a pointer into that file's script, NOT a value), `flagProps` (valueless attributes), `spreadProps` (`v-bind=\"obj\"`, an unknown set), and `renderedWhen` (the governing v-if/v-show/v-for). Use this — not get_component_props, which reports the DECLARED interface — to learn which literal each mount site passes.",
+      "PROPS AT THE MOUNT SITE (Vue SFCs): each template usage carries `staticProps` (literal values actually passed, e.g. scope=\"all\"), `boundProps` / `vModelProps` (the expression SOURCE for `:prop=\"x\"` — a pointer into that file's script, NOT a value), `flagProps` (valueless attributes), `spreadProps` (`v-bind=\"obj\"`, an unknown set), and `renderedWhen` (the governing v-if/v-show/v-for). Use this — not get_component_props, which reports the DECLARED interface — to learn which literal each mount site passes. " +
+      "SAME NAME IN TWO FILES: when a name is declared in more than one file, every usage carries `resolvesTo` (the declaring file its import points at); pass `file` (a path substring) to scope the whole report to one declaration.",
     inputSchema: {
       type: "object",
       properties: {
@@ -179,6 +180,11 @@ export const CATALOG_TOOLS = [
           type: "string",
           description:
             'Symbol to search for — component, hook, service, or plain exported function (e.g., "Button", "useHandoffState", "isOrderItemSettled")',
+        },
+        file: {
+          type: "string",
+          description:
+            "Optional path substring choosing ONE declaration when the name is declared in several files; only usages whose import resolves to it are returned.",
         },
       },
       required: ["name"],

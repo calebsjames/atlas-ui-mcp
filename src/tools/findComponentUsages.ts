@@ -1,14 +1,16 @@
 import fs from "fs/promises";
 import path from "path";
 import type { ComponentScanner } from "../scanner/componentScanner.js";
-import type { CacheManager } from "../cache/cacheManager.js";
 import type { ArchitectureLayer, Component, ProjectConfig, RenderConditions } from "../types.js";
 import {
+  dedupeByPath,
   ensureCatalog,
   escapeRegex,
+  filterByFile,
   nameNotFound,
   type NameSuggestion,
 } from "./shared.js";
+import { CacheManager } from "../cache/cacheManager.js";
 import { findTemplateMountSites, type TemplateMountSite } from "../analyzer/templateMountSites.js";
 import { loadReferenceContents } from "./referenceFiles.js";
 
@@ -36,6 +38,12 @@ export interface ComponentUsage {
   spreadProps?: string[];
   /** v-if / v-show / v-for governing this mount site. */
   renderedWhen?: RenderConditions;
+  /**
+   * The declaring file this usage's import resolves to — set when the name is
+   * declared in more than one file (or `file` was passed), so one
+   * declaration's consumers can be told apart from another's.
+   */
+  resolvesTo?: string;
 }
 
 export interface UsageResolution {
@@ -92,6 +100,8 @@ interface Candidate {
   name: string;
   /** This file declares the symbol — its hits are self-module, not impact. */
   isDeclaringModule: boolean;
+  /** The file's imports, to attribute its usages to one declaration. */
+  imports?: { names: string[]; resolvedPath?: string }[];
 }
 
 /**
@@ -115,7 +125,7 @@ interface Candidate {
  * BOUND at each site (see `staticProps` / `boundProps`).
  */
 export async function findComponentUsages(
-  args: { name: string },
+  args: { name: string; file?: string },
   scanner: ComponentScanner,
   cache: CacheManager,
   workspaceRoot: string,
@@ -178,9 +188,24 @@ export async function findComponentUsages(
   };
 
   // --- Resolve the symbol before looking for usages -------------------------
-  const declaringNodes = cache.getByName(name);
-  const declaringPaths = new Set(declaringNodes.map((c) => c.path));
+  const allDeclaring = dedupeByPath(cache.getByName(name));
+  const declaringNodes = args.file ? filterByFile(allDeclaring, args.file) : allDeclaring;
+  const declaringPaths = new Set(allDeclaring.map((c) => c.path));
   const resolution = describeResolution(name, declaringNodes);
+  if (args.file && declaringNodes.length === 0 && allDeclaring.length) {
+    resolution.note +=
+      ` "file" (${args.file}) matched none of the declarations: ` +
+      allDeclaring.map((c) => c.relativePath).join(", ") + ".";
+  }
+  // Attribute usages to a declaration when that is a real question.
+  const attribute = allDeclaring.length > 1 || !!args.file;
+  const declByKey = new Map(
+    allDeclaring.map((c) => [CacheManager.normalizeModulePath(c.relativePath), c.relativePath])
+  );
+  const targetOf = (candidate: Candidate): string | undefined => {
+    if (candidate.isDeclaringModule) return candidate.relativePath;
+    return resolveUsageTarget(name, candidate.imports, declByKey);
+  };
 
   const candidateSet = new Map<string, Candidate>();
   const addCandidate = (comp: Component, isDeclaringModule: boolean): void => {
@@ -190,6 +215,7 @@ export async function findComponentUsages(
       relativePath: comp.relativePath,
       name: comp.name,
       isDeclaringModule,
+      imports: comp.imports,
     });
   };
 
@@ -202,9 +228,17 @@ export async function findComponentUsages(
   // usages, and their absence is what makes "genuinely unused" provable.
   for (const comp of declaringNodes) addCandidate(comp, true);
 
+  // Scan one candidate, tagging its usages with the declaration they resolve to.
+  const scanTagged = (content: string | null, candidate: Candidate): void => {
+    const found: ComponentUsage[] = [];
+    scanFileForUsages(content, candidate, patterns, name, found);
+    const target = attribute ? targetOf(candidate) : undefined;
+    for (const u of found) usages.push(target ? { ...u, resolvesTo: target } : u);
+  };
+
   for (const candidate of candidateSet.values()) {
     const content = await readFileSafe(candidate.path);
-    scanFileForUsages(content, candidate, patterns, name, usages);
+    scanTagged(content, candidate);
   }
 
   // Hooks are frequently recorded on a component's `hooks` field without the
@@ -216,13 +250,13 @@ export async function findComponentUsages(
 
       const content = await readFileSafe(comp.path);
       if (!content) continue;
-      scanFileForUsages(
-        content,
-        { path: comp.path, relativePath: comp.relativePath, name: comp.name, isDeclaringModule: false },
-        patterns,
-        name,
-        usages
-      );
+      scanTagged(content, {
+        path: comp.path,
+        relativePath: comp.relativePath,
+        name: comp.name,
+        isDeclaringModule: false,
+        imports: comp.imports,
+      });
     }
   }
 
@@ -233,13 +267,26 @@ export async function findComponentUsages(
   const referenceFiles = await loadReferenceContents(workspaceRoot, config);
   for (const [relativePath, content] of referenceFiles) {
     const componentName = path.basename(relativePath, path.extname(relativePath));
-    scanFileForUsages(
-      content,
-      { path: relativePath, relativePath, name: componentName, isDeclaringModule: false },
-      patterns,
-      name,
-      usages
-    );
+    scanTagged(content, {
+      path: relativePath,
+      relativePath,
+      name: componentName,
+      isDeclaringModule: false,
+      imports: attribute ? parseImports(content, relativePath, config) : undefined,
+    });
+  }
+
+  // `file` scopes the report to the chosen declaration(s): keep only usages
+  // that resolve to one of them.
+  let unattributed = 0;
+  if (args.file) {
+    const keep = new Set(declaringNodes.map((c) => c.relativePath));
+    const scoped = usages.filter((u) => {
+      if (u.resolvesTo === undefined) unattributed++;
+      return u.resolvesTo !== undefined && keep.has(u.resolvesTo);
+    });
+    usages.length = 0;
+    usages.push(...scoped);
   }
 
   const seen = new Set<string>();
@@ -282,6 +329,18 @@ export async function findComponentUsages(
     "Static analysis: usages reached through re-export barrels, dynamic property access, or a " +
       "renamed import (`import { a as b }`) are not tracked."
   );
+  if (attribute && !args.file) {
+    caveats.push(
+      `"${name}" is declared in ${allDeclaring.length} files; each usage's \`resolvesTo\` names the ` +
+        "declaration its import points at. Pass `file` to scope the report to one of them."
+    );
+  }
+  if (unattributed) {
+    caveats.push(
+      `${unattributed} usage(s) had no import to attribute (global registration, string mount) ` +
+        "and were left out of this file-scoped report."
+    );
+  }
   if (callRegex) {
     caveats.push(
       "`call` usages are line-level regex matches for `name(` with declaration lines excluded; " +
@@ -310,6 +369,58 @@ export async function findComponentUsages(
       : {}),
     caveats,
   };
+}
+
+/**
+ * Which declaring file a usage in a module with these imports points at: the
+ * import that brings `name` in, resolved by path to one of the declarations.
+ * An import resolving elsewhere is reported as that path (a different module
+ * exporting the same name).
+ */
+function resolveUsageTarget(
+  name: string,
+  imports: { names: string[]; resolvedPath?: string }[] | undefined,
+  declByKey: Map<string, string>
+): string | undefined {
+  const lower = name.toLowerCase();
+  for (const imp of imports || []) {
+    if (!imp.resolvedPath || !imp.names.some((n) => n.toLowerCase() === lower)) continue;
+    const key = CacheManager.normalizeModulePath(imp.resolvedPath);
+    return declByKey.get(key) ?? declByKey.get(`${key}/index`) ?? imp.resolvedPath;
+  }
+  return undefined;
+}
+
+/**
+ * Minimal import parse for reference files (entry/route files read as raw
+ * text): `import X from "…"` / `import { X } from "…"`, resolved through the
+ * configured aliases or relative to the file.
+ */
+function parseImports(
+  content: string,
+  relativePath: string,
+  config?: ProjectConfig
+): { names: string[]; resolvedPath?: string }[] {
+  const out: { names: string[]; resolvedPath?: string }[] = [];
+  const re = /import\s+([^;]*?)\s+from\s+["']([^"']+)["']/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(content))) {
+    const names = m[1].replace(/[{}*]/g, " ").split(/[\s,]+/).filter((n) => /^[A-Za-z_$][\w$]*$/.test(n) && n !== "as" && n !== "type");
+    const source = m[2];
+    let resolvedPath: string | undefined;
+    const aliases = { "@/": "src/", ...(config?.aliases || {}) };
+    for (const [alias, target] of Object.entries(aliases)) {
+      if (source.startsWith(alias)) {
+        resolvedPath = target + source.slice(alias.length);
+        break;
+      }
+    }
+    if (!resolvedPath && source.startsWith(".")) {
+      resolvedPath = path.posix.join(path.posix.dirname(relativePath.split(path.sep).join("/")), source);
+    }
+    out.push({ names, ...(resolvedPath ? { resolvedPath } : {}) });
+  }
+  return out;
 }
 
 /** Where the symbol is declared, and how confident we are that it exists at all. */
