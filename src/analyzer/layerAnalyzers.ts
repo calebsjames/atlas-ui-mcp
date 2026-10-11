@@ -298,6 +298,9 @@ function extractEndpointsFromCall(
   sourceFile: ts.SourceFile,
   allowWrapper = true
 ): string[] {
+  // Client-side navigation takes a path too, but it is not a request:
+  // `router.push("/home")` used to surface as an API endpoint.
+  if (isNavigationCall(node, sourceFile)) return [];
   // 1. Standard client verb: x.get(...) / x.post(...)
   if (ts.isPropertyAccessExpression(node.expression)) {
     const verb = node.expression.name.text.toUpperCase();
@@ -360,6 +363,52 @@ function extractEndpointsFromCall(
     }
   }
   return [...new Set(out)];
+}
+
+const ROUTER_METHODS = new Set(["push", "replace", "resolve", "go", "back", "forward", "navigate"]);
+const NAVIGATE_FUNCTIONS = new Set(["navigate", "navigateTo", "redirect", "useNavigate"]);
+
+/**
+ * Is this call a client-side navigation rather than an HTTP request?
+ *  - `router.push/replace(...)` and friends on a router-ish receiver: a name
+ *    matching /router/i (`router`, `this.$router`, `appRouter`) or a local
+ *    bound from `useRouter()` (`const r = useRouter()`);
+ *  - `navigate(...)` / `navigateTo(...)` / `redirect(...)`;
+ *  - `location.assign/replace(...)` (incl. `window.location`) and `window.open(...)`.
+ */
+function isNavigationCall(node: ts.CallExpression, sourceFile: ts.SourceFile): boolean {
+  const callee = node.expression;
+  if (ts.isIdentifier(callee)) return NAVIGATE_FUNCTIONS.has(callee.text);
+  if (!ts.isPropertyAccessExpression(callee)) return false;
+  const method = callee.name.text;
+  const receiver = callee.expression;
+  const receiverText = receiver.getText(sourceFile);
+  if ((method === "assign" || method === "replace") && /(^|\.)location$/.test(receiverText)) return true;
+  if (method === "open" && /^(window|globalThis)$/.test(receiverText)) return true;
+  if (!ROUTER_METHODS.has(method)) return false;
+  if (/router/i.test(receiverText)) return true;
+  return ts.isIdentifier(receiver) && routerLocals(sourceFile).has(receiver.text);
+}
+
+const routerLocalCache = new WeakMap<ts.SourceFile, Set<string>>();
+/** Locals bound from `useRouter()` in this file. */
+function routerLocals(sf: ts.SourceFile): Set<string> {
+  let names = routerLocalCache.get(sf);
+  if (names) return names;
+  names = new Set();
+  const visit = (n: ts.Node): void => {
+    if (
+      ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer &&
+      ts.isCallExpression(n.initializer) && ts.isIdentifier(n.initializer.expression) &&
+      n.initializer.expression.text === "useRouter"
+    ) {
+      names!.add(n.name.text);
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  routerLocalCache.set(sf, names);
+  return names;
 }
 
 function getEndpointText(arg: ts.Expression, sourceFile: ts.SourceFile): string | undefined {
