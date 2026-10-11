@@ -167,14 +167,19 @@ export const BROWSER_TOOLS = [
       properties: {
         steps: {
           type: "array",
-          description: "Ordered list of steps. A step must have a navigation target and/or actions.",
+          description:
+            "Ordered list of steps. A step may navigate (component/route/url), reveal a `section` of the page the flow is on, run actions, or do none of these — a step with only label/settleMs just settles and screenshots the current page.",
           items: {
             type: "object",
             properties: {
               component: { type: "string", description: "Catalog component name to navigate to (resolved to a URL via the route map)." },
               route: { type: "string", description: "Route path to navigate to." },
               url: { type: "string", description: "Absolute URL to navigate to." },
-              section: { type: "string", description: "Reveal this in-app section of a one-route shell (see get_section_map) after navigating — its activator click is prepended to this step's actions." },
+              section: {
+                type: "string",
+                description:
+                  "Reveal this in-app section (see get_section_map; matched case- and whitespace-insensitively). With component/route/url it applies to that page; ALONE it navigates within the page the flow is already on (query sections re-navigate with the param set; click sections prepend the activator click). An unknown id is an error listing the valid ones.",
+              },
               params: { type: "object", description: "Dynamic route segment values, e.g. {\"id\": \"123\"}." },
               actions: {
                 type: "array",

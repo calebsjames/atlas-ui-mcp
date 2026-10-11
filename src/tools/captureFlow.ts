@@ -4,7 +4,8 @@ import type { RouteAnalyzer } from "../analyzer/routeAnalyzer.js";
 import type { ComponentScanner } from "../scanner/componentScanner.js";
 import type { CacheManager } from "../cache/cacheManager.js";
 import type { BrowserConfig } from "../types.js";
-import { resolveRoute } from "../browser/resolveRoute.js";
+import { resolveRoute, revealOnRoute, routeForUrl } from "../browser/resolveRoute.js";
+import { getRouteMap, type RouteMapEntry } from "./getRouteMap.js";
 import type { McpContentResult } from "../browser/response.js";
 import { toAbsoluteUrl } from "../util.js";
 import type { WaitUntil } from "../browser/quiet.js";
@@ -50,22 +51,34 @@ export async function captureFlow(
   }
 
   // Resolve each step's navigation target (if any) to a concrete URL up front.
+  // `current` tracks the page the flow is on (route + params + url), so a
+  // `section`-only step can reveal a section of it.
   const resolved: ResolvedFlowStep[] = [];
-  for (let i = 0; i < args.steps.length; i++) {
-    const step = args.steps[i];
-    const hasNav = !!(step.component || step.route || step.url);
-    const hasActions = Array.isArray(step.actions) && step.actions.length > 0;
-    if (!hasNav && !hasActions) {
-      throw new Error(
-        `Step ${i + 1} does nothing — give it a navigation target (component/route/url) and/or actions.`
-      );
-    }
+  let routes: RouteMapEntry[] | undefined;
+  const routeMap = async () => (routes ??= await getRouteMap(routeAnalyzer, scanner, cache));
+  let current: { route: RouteMapEntry; url: string } | undefined;
 
+  for (let i = 0; i < args.steps.length; i++) {
+    const step = args.steps[i] ?? {};
     let url: string | undefined;
     let revealActions: FlowAction[] | undefined;
+
     if (step.url) {
       // Accept absolute URLs or dev-server-relative paths, like check_page does.
       url = toAbsoluteUrl(session.baseUrl, step.url);
+      const hit = routeForUrl(url, await routeMap());
+      current = hit ? { route: hit.route, url } : undefined;
+      if (step.section) {
+        if (!current) {
+          throw new Error(
+            `Step ${i + 1}: can't reveal section "${step.section}" — ${step.url} matches no route in the route map.`
+          );
+        }
+        const r = await revealOnRoute(current.route, url, { sectionId: step.section }, cache);
+        url = r.url;
+        revealActions = r.revealActions;
+        current = { ...current, url };
+      }
     } else if (step.component || step.route) {
       const r = await resolveRoute(
         {
@@ -82,13 +95,37 @@ export async function captureFlow(
       );
       url = r.url;
       revealActions = r.revealActions;
+      const route = (await routeMap()).find((x) => x.path === r.routePath);
+      current = route ? { route, url } : undefined;
+    } else if (step.section) {
+      // Section-only step: a navigation WITHIN the page the flow is on — a URL
+      // query reveal re-navigates; a click reveal acts on the current page.
+      if (!current) {
+        throw new Error(
+          `Step ${i + 1}: "section" needs a page to reveal it on — give this step (or an earlier one) ` +
+            `a component, route or url of a page that get_section_map lists.`
+        );
+      }
+      const r = await revealOnRoute(current.route, current.url, { sectionId: step.section }, cache);
+      if (r.viewSection?.via === "query") {
+        url = r.url;
+        current = { ...current, url };
+      }
+      revealActions = r.revealActions;
     }
+    // A step with neither navigation nor actions is a settle/screenshot of
+    // the current page — allowed.
 
     // Reveal a click-switched section first, then run the step's own actions.
     const actions = revealActions ? [...revealActions, ...(step.actions ?? [])] : step.actions;
 
     resolved.push({
-      label: step.label || step.component || step.route || step.url || `step ${i + 1}`,
+      label:
+        step.label ||
+        step.component ||
+        step.route ||
+        step.url ||
+        (step.section ? `section ${step.section}` : `step ${i + 1}`),
       url,
       actions,
       settleMs: step.settleMs,

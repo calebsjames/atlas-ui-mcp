@@ -113,10 +113,6 @@ export async function resolveRoute(
 
   const { url, filled, guessed } = fillSegments(opts.baseUrl, match.path, params);
 
-  let revealActions: FlowAction[] | undefined;
-  let viewSection: ResolvedRoute["viewSection"];
-  let finalUrl = url;
-
   // Reveal target: an explicit section id, or the child we resolved through a
   // container's childComponents list. Either drives the section-reveal engine.
   const target =
@@ -125,42 +121,12 @@ export async function resolveRoute(
       : matchedChildName
         ? { child: matchedChildName }
         : null;
-  if (target) {
-    const page = findByLayers(cache.getByName(match.component), ROUTE_OWNER_LAYERS);
-    if (page) {
-      const plan = await planSectionReveal(page.path, page.name, target);
-      if (!plan && opts.section != null) {
-        // An unmatched id used to fall through silently and screenshot the
-        // container's DEFAULT view. Say so, with the ids that do exist.
-        const valid = await listSectionIds(page.path, page.name);
-        throw new Error(
-          valid.length
-            ? `No section "${opts.section}" on ${page.name} (${match.path}). Valid sections: ` +
-                valid.map((v) => JSON.stringify(v)).join(", ") +
-                ". Ids match case- and whitespace-insensitively; see get_section_map."
-            : `${page.name} (${match.path}) has no statically detected sections, so section ` +
-                `"${opts.section}" can't be revealed. Drop "section" or drive the UI with capture_flow.`
-        );
-      }
-      if (plan) {
-        for (const q of [plan.queryParam, ...(plan.alsoQuery ?? [])]) {
-          if (!q) continue;
-          finalUrl += (finalUrl.includes("?") ? "&" : "?") + `${q.key}=${encodeURIComponent(q.value)}`;
-        }
-        if (plan.actions) revealActions = plan.actions;
-        viewSection = {
-          container: plan.container,
-          ...(plan.section != null ? { section: plan.section } : {}),
-          ...(plan.selector != null ? { selector: plan.selector } : {}),
-          via: plan.via,
-          ...(plan.condition ? { condition: plan.condition } : {}),
-          ...(plan.conditions ? { conditions: plan.conditions } : {}),
-          applied: plan.applied,
-          ...(plan.note ? { note: plan.note } : {}),
-        };
-      }
-    }
-  }
+  const reveal = target
+    ? await revealOnRoute(match, url, target, cache)
+    : { url, revealActions: undefined, viewSection: undefined };
+  const finalUrl = reveal.url;
+  const revealActions = reveal.revealActions;
+  const viewSection = reveal.viewSection;
 
   return {
     url: finalUrl,
@@ -197,4 +163,115 @@ function fillSegments(
   });
 
   return { url: toAbsoluteUrl(baseUrl, replaced), filled, guessed };
+}
+
+/**
+ * Which route pattern a concrete URL (absolute or dev-server-relative) lands
+ * on, with the dynamic segment values it carries — so a later step can reveal
+ * a section of the page an earlier raw-`url` step opened.
+ */
+export function routeForUrl(
+  url: string,
+  routes: RouteMapEntry[]
+): { route: RouteMapEntry; params: Record<string, string> } | undefined {
+  let pathname: string;
+  try {
+    pathname = new URL(url, "http://placeholder").pathname;
+  } catch {
+    return undefined;
+  }
+  const norm = (p: string) => (p.length > 1 ? p.replace(/\/+$/, "") : p);
+  pathname = norm(pathname);
+  // Static routes first, so `/home` never loses to `/:slug`.
+  const ordered = [...routes].sort((a, b) => Number(a.isDynamic) - Number(b.isDynamic));
+  for (const route of ordered) {
+    const names: string[] = [];
+    const pattern = norm(route.path)
+      .split("/")
+      .map((seg) => {
+        const m = /^:([A-Za-z0-9_]+)\??$|^\[([A-Za-z0-9_]+)\]$/.exec(seg);
+        if (m) {
+          names.push(m[1] || m[2]);
+          return "([^/]+)";
+        }
+        return seg.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      })
+      .join("/");
+    const hit = new RegExp(`^${pattern}$`).exec(pathname);
+    if (!hit) continue;
+    const params: Record<string, string> = {};
+    names.forEach((n, i) => (params[n] = decodeURIComponent(hit[i + 1])));
+    return { route, params };
+  }
+  return undefined;
+}
+
+/**
+ * Plan how to reveal a section (by id or by the child it renders) on the page
+ * a route renders, starting from a concrete `url` of that route. Query
+ * reveals are merged into `url` (an existing value for the key is replaced);
+ * click reveals come back as `revealActions`. An unknown section id throws
+ * with the valid ids — it used to fall through silently to the default view.
+ */
+export async function revealOnRoute(
+  match: RouteMapEntry,
+  url: string,
+  target: { sectionId?: string; child?: string },
+  cache: CacheManager
+): Promise<{ url: string; revealActions?: FlowAction[]; viewSection?: ResolvedRoute["viewSection"] }> {
+  const page = findByLayers(cache.getByName(match.component), ROUTE_OWNER_LAYERS);
+  if (!page) return { url };
+  const plan = await planSectionReveal(page.path, page.name, target);
+  if (!plan) {
+    if (target.sectionId == null) return { url };
+    const valid = await listSectionIds(page.path, page.name);
+    throw new Error(
+      valid.length
+        ? `No section "${target.sectionId}" on ${page.name} (${match.path}). Valid sections: ` +
+            valid.map((v) => JSON.stringify(v)).join(", ") +
+            ". Ids match case- and whitespace-insensitively; see get_section_map."
+        : `${page.name} (${match.path}) has no statically detected sections, so section ` +
+            `"${target.sectionId}" can't be revealed. Drop "section" or drive the UI with capture_flow.`
+    );
+  }
+  let finalUrl = url;
+  for (const q of [plan.queryParam, ...(plan.alsoQuery ?? [])]) {
+    if (q) finalUrl = setQueryParam(finalUrl, q.key, q.value);
+  }
+  return {
+    url: finalUrl,
+    ...(plan.actions ? { revealActions: plan.actions } : {}),
+    viewSection: {
+      container: plan.container,
+      ...(plan.section != null ? { section: plan.section } : {}),
+      ...(plan.selector != null ? { selector: plan.selector } : {}),
+      via: plan.via,
+      ...(plan.condition ? { condition: plan.condition } : {}),
+      ...(plan.conditions ? { conditions: plan.conditions } : {}),
+      applied: plan.applied,
+      ...(plan.note ? { note: plan.note } : {}),
+    },
+  };
+}
+
+/** Set `key=value` on a URL's query, replacing an existing value; values are %-encoded. */
+export function setQueryParam(url: string, key: string, value: string): string {
+  const hashAt = url.indexOf("#");
+  const hash = hashAt >= 0 ? url.slice(hashAt) : "";
+  const base = hashAt >= 0 ? url.slice(0, hashAt) : url;
+  const qAt = base.indexOf("?");
+  const pathPart = qAt >= 0 ? base.slice(0, qAt) : base;
+  const pairs = (qAt >= 0 ? base.slice(qAt + 1) : "")
+    .split("&")
+    .filter(Boolean)
+    .filter((pair) => {
+      const k = pair.split("=")[0];
+      try {
+        return decodeURIComponent(k.replace(/\+/g, " ")) !== key;
+      } catch {
+        return k !== key;
+      }
+    });
+  pairs.push(`${encodeURIComponent(key)}=${encodeURIComponent(value)}`);
+  return `${pathPart}?${pairs.join("&")}${hash}`;
 }
