@@ -13,7 +13,9 @@ import { matchesExclude, readPackageDeps } from "../util.js";
  * entry, not an investigation.
  */
 
-const UI_EXTENSIONS = [".tsx", ".jsx", ".vue"];
+// `.ts` counts too: a plain TS module outside every target (src/constants,
+// src/realtime, …) is just as invisible to the tools as a missed component.
+const UI_EXTENSIONS = [".tsx", ".jsx", ".vue", ".ts"];
 
 /** Never worth descending into, regardless of the project's exclude config. */
 const ALWAYS_SKIP_DIRS = new Set([
@@ -37,7 +39,7 @@ export interface CoverageCheckOptions {
   excludePatterns: string[];
   /** Files consumed outside scanTargets (root entry files, configured route files). */
   extraCoveredFiles: string[];
-  /** How many UI-extension files the scan actually cataloged, for scale. */
+  /** How many source files (.ts/.tsx/.jsx/.vue) the scan actually cataloged, for scale. */
   scannedUiFileCount: number;
 }
 
@@ -77,7 +79,7 @@ export async function computeCoverageWarning(
     .map(({ dir, count }) => `${dir} (${count})`)
     .join(", ");
   const message =
-    `${missedFileCount} UI source files (.tsx/.jsx/.vue) are not covered by any scan target, ` +
+    `${missedFileCount} source files (.ts/.tsx/.jsx/.vue) are not covered by any scan target, ` +
     `while the catalog holds ${scannedUiFileCount} — the scan likely missed most of the app. ` +
     `Heaviest uncovered directories: ${dirList}. If these are part of the app, add matching ` +
     `scanTargets entries to .atlas-ui.json.`;
@@ -128,6 +130,7 @@ async function findUncoveredUiFiles(opts: CoverageCheckOptions): Promise<string[
 
       if (!entry.isFile()) continue;
       if (!UI_EXTENSIONS.some((ext) => name.endsWith(ext))) continue;
+      if (name.endsWith(".d.ts")) continue; // declarations, not modules
       if (matchesExclude(name, excludePatterns)) continue;
 
       const rel = toPosix(path.relative(workspaceRoot, path.join(dir, name)));

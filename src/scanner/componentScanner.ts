@@ -25,6 +25,15 @@ export class ComponentScanner {
   private analyzer: ComponentAnalyzer;
   private excludePatterns: string[];
   private routeFiles: string[];
+  private fallbackScan: boolean;
+
+  /**
+   * The util fallback layer: every `src/**\/*.ts` module no configured target
+   * covers. Default target lists name a fixed set of directories, so anything
+   * else under src/ (constants, realtime, navigation, config, lib, styles …)
+   * used to be invisible to every tool.
+   */
+  static FALLBACK_TARGET: ScanTarget = { dir: "src", extensions: [".ts"], type: "util" };
 
   constructor(workspaceRoot: string, config?: ProjectConfig) {
     this.workspaceRoot = workspaceRoot;
@@ -34,6 +43,7 @@ export class ComponentScanner {
       "node_modules", "dist", "build", "__tests__", "*.test.*", "*.spec.*",
     ];
     this.routeFiles = config?.routeFiles || [];
+    this.fallbackScan = config?.fallbackScan !== false;
   }
 
   /**
@@ -74,6 +84,10 @@ export class ComponentScanner {
     }
 
     allComponents.push(...(await this.scanRootEntryFiles(allComponents)));
+    if (this.fallbackScan) {
+      allComponents.push(...(await this.scanFallback(allComponents)));
+    }
+    const unscannedDirs = await this.findUnscannedDirs(allComponents);
 
     // Organize by category
     const categories: Record<string, Component[]> = {};
@@ -93,11 +107,13 @@ export class ComponentScanner {
 
     const coverageWarning = await computeCoverageWarning({
       workspaceRoot: this.workspaceRoot,
-      scanTargets: this.scanTargets,
+      scanTargets: this.fallbackScan
+        ? [...this.scanTargets, ComponentScanner.FALLBACK_TARGET]
+        : this.scanTargets,
       excludePatterns: this.excludePatterns,
       extraCoveredFiles: [...ComponentScanner.ROOT_ENTRY_FILES, ...this.routeFiles],
       scannedUiFileCount: allComponents.filter((c) =>
-        /\.(tsx|jsx|vue)$/.test(c.relativePath)
+        /\.(tsx|jsx|vue|ts)$/.test(c.relativePath)
       ).length,
     });
 
@@ -107,6 +123,7 @@ export class ComponentScanner {
       totalCount: allComponents.length,
       lastScanned: Date.now(),
       ...(coverageWarning ? { coverageWarning } : {}),
+      unscannedDirs,
     };
   }
 
@@ -143,27 +160,42 @@ export class ComponentScanner {
       if (!entry.isFile()) continue;
       if (!target.extensions.some((ext) => entry.name.endsWith(ext))) continue;
 
+      const category = parentCategory || this.determineCategory(fullPath, target);
+      const component = await this.buildComponent(fullPath, entry.name, target, category);
+      if (component) components.push(component);
+    }
+
+    return components;
+  }
+
+  /** Read, name, classify and analyze one file into a catalog node (null if unreadable). */
+  private async buildComponent(
+    fullPath: string,
+    entryName: string,
+    target: ScanTarget,
+    category: string
+  ): Promise<Component | null> {
       let content: string;
       try {
         content = await fs.readFile(fullPath, "utf-8");
       } catch {
-        continue;
+        return null;
       }
 
       const stats = await fs.stat(fullPath);
-      const category = parentCategory || this.determineCategory(fullPath, target);
       const relativePath = path.relative(this.workspaceRoot, fullPath);
-      const fileBaseName = entry.name.replace(/\.(vue|tsx?|jsx?)$/, "");
+      const fileBaseName = entryName.replace(/\.(vue|tsx?|jsx?)$/, "");
       const { name: componentName, exportedNames } = this.resolveComponentName(
-        content, fileBaseName, entry.name, target.type
+        content, fileBaseName, entryName, target.type
       );
 
       // Classify by content, not just directory: a use*-named .ts module living
-      // under a components/ tree is a composable/hook, not a component.
+      // under a components/ tree (or reached by the util fallback) is a
+      // composable/hook, not a component/util.
       let layer: ArchitectureLayer = target.type;
       if (
-        layer === "component" &&
-        /\.(ts|js)$/.test(entry.name) &&
+        (layer === "component" || target === ComponentScanner.FALLBACK_TARGET) &&
+        /\.(ts|js)$/.test(entryName) &&
         /^use[A-Z0-9]/.test(componentName)
       ) {
         layer = "hook";
@@ -182,16 +214,88 @@ export class ComponentScanner {
       };
 
       // Track filename alias when defineComponent name differs from filename
-      if (componentName !== fileBaseName && fileBaseName !== componentName) {
-        (component as any).fileAlias = fileBaseName;
+      if (componentName !== fileBaseName) {
+        component.fileAlias = fileBaseName;
       }
       if (exportedNames.length > 0) component.exportedNames = exportedNames;
 
-      components.push(component);
-    }
-
-    return components;
+      return component;
   }
+
+  /**
+   * The util fallback: every `src/**\/*.ts` module (not `.d.ts`, not excluded,
+   * not a route/root-entry file) that no target already cataloged.
+   */
+  private async scanFallback(existing: Component[]): Promise<Component[]> {
+    const target = ComponentScanner.FALLBACK_TARGET;
+    const seen = new Set(existing.map((c) => toPosix(c.relativePath)));
+    const skip = new Set([...ComponentScanner.ROOT_ENTRY_FILES, ...this.routeFiles].map(toPosix));
+    const out: Component[] = [];
+    for (const rel of await this.walkSourceFiles(target.dir, target.extensions)) {
+      if (seen.has(rel) || skip.has(rel)) continue;
+      if (isTestSupportPath(rel)) continue;
+      const fullPath = path.join(this.workspaceRoot, rel);
+      // A barrel (`export * from './x'` only) adds no symbol of its own, and a
+      // node on it would shadow the directory-import barrel resolution that
+      // maps `@/components/ui/button` to the component inside.
+      if (await isBarrelOnly(fullPath)) continue;
+      const component = await this.buildComponent(
+        fullPath, path.basename(rel), target, this.determineCategory(fullPath, target)
+      );
+      if (component) out.push(component);
+    }
+    return out;
+  }
+
+  /**
+   * Directories under src/ holding source files the catalog does not index —
+   * reported always, so a partial gap is visible even when it is too small to
+   * trip the coverage warning.
+   */
+  private async findUnscannedDirs(catalog: Component[]): Promise<{ dir: string; count: number }[]> {
+    const seen = new Set(catalog.map((c) => toPosix(c.relativePath)));
+    const skip = new Set([...ComponentScanner.ROOT_ENTRY_FILES, ...this.routeFiles].map(toPosix));
+    const byDir = new Map<string, number>();
+    for (const rel of await this.walkSourceFiles("src", [".ts", ".tsx", ".vue", ".js", ".jsx"])) {
+      if (seen.has(rel) || skip.has(rel)) continue;
+      const dir = path.posix.dirname(rel);
+      byDir.set(dir, (byDir.get(dir) || 0) + 1);
+    }
+    return [...byDir.entries()]
+      .map(([dir, count]) => ({ dir, count }))
+      .sort((a, b) => b.count - a.count || a.dir.localeCompare(b.dir));
+  }
+
+  /** Posix workspace-relative paths of source files under `dir` (declarations and excluded names skipped). */
+  private async walkSourceFiles(dir: string, extensions: string[]): Promise<string[]> {
+    const out: string[] = [];
+    const stack = [path.join(this.workspaceRoot, dir)];
+    while (stack.length) {
+      const current = stack.pop()!;
+      let entries;
+      try {
+        entries = await fs.readdir(current, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        const name = entry.name;
+        if (entry.isDirectory()) {
+          if (name.startsWith(".") || ComponentScanner.ALWAYS_SKIP_DIRS.has(name)) continue;
+          if (this.isExcluded(name)) continue;
+          stack.push(path.join(current, name));
+          continue;
+        }
+        if (!entry.isFile() || name.endsWith(".d.ts") || this.isExcluded(name)) continue;
+        if (!extensions.some((ext) => name.endsWith(ext))) continue;
+        out.push(toPosix(path.relative(this.workspaceRoot, path.join(current, name))));
+      }
+    }
+    return out.sort();
+  }
+
+  private static ALWAYS_SKIP_DIRS = new Set(["node_modules", "dist", "build", "out", "coverage"]);
+
 
   /**
    * Scan the well-known root/entry files (App.*, main.*) into the catalog as
@@ -349,15 +453,20 @@ export class ComponentScanner {
     try {
       const srcDir = path.join(this.workspaceRoot, "src");
       await fs.access(srcDir);
-      const rootWatcher = fs.watch(srcDir, { recursive: false });
+      // With the util fallback on, every src/**/*.ts can be a catalog node,
+      // so watch the whole tree for .ts edits (target dirs double-fire; an
+      // invalidation is idempotent).
+      const recursive = this.fallbackScan;
+      const rootWatcher = fs.watch(srcDir, { recursive });
       let rootStopped = false;
       (async () => {
         try {
           for await (const event of rootWatcher) {
             if (rootStopped) break;
-            if (event.filename && /^(App|main)\.(vue|tsx?|jsx?)$/.test(event.filename)) {
-              onChange();
-            }
+            const f = event.filename;
+            if (!f) continue;
+            if (/^(App|main)\.(vue|tsx?|jsx?)$/.test(f)) onChange();
+            else if (recursive && f.endsWith(".ts") && !f.endsWith(".d.ts")) onChange();
           }
         } catch (error) {
           if (!rootStopped) {
@@ -418,4 +527,38 @@ export class ComponentScanner {
       }
     };
   }
+}
+
+function toPosix(p: string): string {
+  return p.split(path.sep).join("/");
+}
+
+/**
+ * Test scaffolding the util fallback leaves alone: setup files referenced from
+ * tool config outside src/ and dirs of mocks/fixtures. Indexed, they read as
+ * dead code. Universal conventions only — no app-specific names.
+ */
+const TEST_SUPPORT_DIRS = new Set([
+  "test", "tests", "testing", "__mocks__", "mocks", "__fixtures__", "fixtures", "e2e",
+]);
+function isTestSupportPath(rel: string): boolean {
+  const parts = rel.split("/");
+  const base = parts[parts.length - 1];
+  if (/^setup-?tests?\.[jt]s$/i.test(base) || /\.stories\.[jt]s$/.test(base)) return true;
+  return parts.slice(0, -1).some((p) => TEST_SUPPORT_DIRS.has(p));
+}
+
+/** Every top-level statement is an import or an `export … from` re-export. */
+async function isBarrelOnly(fullPath: string): Promise<boolean> {
+  let content: string;
+  try {
+    content = await fs.readFile(fullPath, "utf-8");
+  } catch {
+    return false;
+  }
+  const sf = ts.createSourceFile(fullPath, content, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
+  if (sf.statements.length === 0) return false;
+  return sf.statements.every(
+    (st) => ts.isImportDeclaration(st) || (ts.isExportDeclaration(st) && !!st.moduleSpecifier)
+  );
 }

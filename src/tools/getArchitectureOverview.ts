@@ -113,6 +113,7 @@ export async function getArchitectureOverview(
     dataFlowChains: [...new Set(dataFlowChains)].slice(0, 30),
     ...(hasPhiData ? { phiViolationCount } : {}),
     ...(catalog.coverageWarning ? { coverageWarning: catalog.coverageWarning } : {}),
+    ...(catalog.unscannedDirs?.length ? { unscannedDirs: catalog.unscannedDirs } : {}),
     routes: routes.map((r) => ({
       path: r.path,
       component: r.component,

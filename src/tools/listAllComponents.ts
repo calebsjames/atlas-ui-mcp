@@ -10,6 +10,8 @@ export interface ListAllComponentsResult {
   components: CatalogItemSummary[] | Component[];
   /** Only present when the scan likely missed most of the app's UI files. */
   coverageWarning?: ScanCoverageWarning;
+  /** Directories under src/ with source files the catalog does not index. */
+  unscannedDirs?: { dir: string; count: number }[];
 }
 
 /**
@@ -41,5 +43,6 @@ export async function listAllComponents(
     byLayer,
     components,
     ...(catalog.coverageWarning ? { coverageWarning: catalog.coverageWarning } : {}),
+    ...(catalog.unscannedDirs?.length ? { unscannedDirs: catalog.unscannedDirs } : {}),
   };
 }

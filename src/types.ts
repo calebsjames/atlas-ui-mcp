@@ -29,6 +29,12 @@ export interface ProjectConfig {
     additionalPatterns?: string[];
   };
   browser?: BrowserConfig;
+  /**
+   * Index every `src/**\/*.ts` module no scan target covers, as layer `util`
+   * (`hook` when its primary export is `use*`). Default true. Without it,
+   * src/constants, src/realtime, src/config.ts, … are invisible to every tool.
+   */
+  fallbackScan?: boolean;
   /** Tunables for template-layer (overlay/z-index/header) design-drift detection. */
   templatePatterns?: {
     overlayClasses?: string[]; // extra class tokens that mark an overlay/backdrop
@@ -313,9 +319,9 @@ export interface DeadCodeEntry {
  * away instead of reading as "this app has no components".
  */
 export interface ScanCoverageWarning {
-  /** UI source files (.tsx/.jsx/.vue) not covered by any scan target. */
+  /** Source files (.ts/.tsx/.jsx/.vue) not covered by any scan target. */
   missedFileCount: number;
-  /** UI source files the scan did catalog, for scale. */
+  /** Source files (.ts/.tsx/.jsx/.vue) the scan did catalog, for scale. */
   scannedUiFileCount: number;
   /** Directories holding uncovered files, heaviest first (top 8). */
   uncoveredDirs: { dir: string; count: number }[];
@@ -334,6 +340,12 @@ export interface ComponentCatalog {
   routes?: RouteEntry[];
   /** Only present when the scan likely missed most of the app's UI files. */
   coverageWarning?: ScanCoverageWarning;
+  /**
+   * Directories under src/ holding source files (.ts/.tsx/.vue/.js/.jsx) the
+   * catalog does NOT index, heaviest first. Empty when everything is covered.
+   * Always computed — unlike coverageWarning it reports partial gaps too.
+   */
+  unscannedDirs?: { dir: string; count: number }[];
 }
 
 /**
