@@ -284,7 +284,7 @@ export const CATALOG_TOOLS = [
   {
     name: "get_data_flow",
     description:
-      "Trace the full data path from a component through composables/stores → services → adapters → API endpoints, INCLUDING data fetched by child components. Returns per-chain detail (each tagged with the `via` render path that reached it) plus `allEndpoints` — the union of every endpoint the rendered route hits. Store-mediated flows (Pinia/Zustand) are traced too. If the name matches multiple items, returns `ambiguous` with candidates — re-call with `file`.",
+      "Trace the full data path from a component through composables/stores → services → adapters → API endpoints, INCLUDING data fetched by child components. Returns per-chain detail (each tagged with the `via` render path that reached it) plus `allEndpoints` — the union of every endpoint the rendered route hits. Store-mediated flows (Pinia/Zustand) are traced too. Large traces come back with `mode: \"summary\"` (owners + counts; allEndpoints still complete) — pass summary:false for every chain. An EMPTY trace carries `resolved: true` and a `reason`; a lookup miss is `found: false`. If the name matches multiple items, returns `ambiguous` with candidates — re-call with `file`.",
     inputSchema: {
       type: "object",
       properties: {
@@ -297,6 +297,11 @@ export const CATALOG_TOOLS = [
           type: "number",
           description:
             "How deep into the child component tree to trace (default 3). 0 = the target's own calls only.",
+        },
+        summary: {
+          type: "boolean",
+          description:
+            "Summary mode: allEndpoints plus per-owner chain/endpoint counts instead of every chain. Turns on automatically when the full trace exceeds ~20k characters (a whole shell page); pass false to force full chains, true to force the summary.",
         },
         file: {
           type: "string",

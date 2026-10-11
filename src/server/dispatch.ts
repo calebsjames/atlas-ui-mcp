@@ -5,6 +5,7 @@ import type { RouteAnalyzer } from "../analyzer/routeAnalyzer.js";
 import type { BrowserSession } from "../browser/session.js";
 import type { ArchitectureLayer, BrowserConfig, ProjectConfig } from "../types.js";
 import type { WaitUntil } from "../browser/quiet.js";
+import { compactContent, serializeResult } from "./serialize.js";
 import { listAllComponents } from "../tools/listAllComponents.js";
 import { searchComponents } from "../tools/searchComponents.js";
 import { getComponentProps } from "../tools/getComponentProps.js";
@@ -143,6 +144,7 @@ const HANDLERS: Record<string, ToolHandler> = {
         name: requireStringArg(args, "name"),
         depth: args?.depth as number | undefined,
         file: args?.file as string | undefined,
+        summary: args?.summary as boolean | undefined,
       },
       ctx.scanner, ctx.cache
     ),
@@ -235,8 +237,8 @@ const HANDLERS: Record<string, ToolHandler> = {
     ),
 };
 
-function jsonResponse(data: unknown) {
-  return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+function jsonResponse(data: unknown, workspaceRoot: string) {
+  return { content: [{ type: "text", text: serializeResult(data, { workspaceRoot }) }] };
 }
 
 /**
@@ -250,16 +252,16 @@ export async function dispatchToolCall(name: string, args: ToolArgs, ctx: ToolCo
     if (!handler) throw new Error(`Unknown tool: ${name}`);
     const result = await handler(args, ctx);
     if (result && typeof result === "object" && Array.isArray((result as any).content)) {
-      return result as { content: unknown[] };
+      return compactContent(result as { content: unknown[] }, { workspaceRoot: ctx.workspaceRoot });
     }
-    return jsonResponse(result);
+    return jsonResponse(result, ctx.workspaceRoot);
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : "Unknown error";
     return {
       content: [
         {
           type: "text",
-          text: JSON.stringify({ error: errorMessage }, null, 2),
+          text: serializeResult({ error: errorMessage }),
         },
       ],
       isError: true,

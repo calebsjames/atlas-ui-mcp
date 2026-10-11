@@ -40,7 +40,7 @@ export async function verifyDataFlow(
   const flow = await getDataFlow(
     // `file` disambiguates when the name collides across catalog items; spread
     // so it's only present when supplied.
-    { name: args.name, depth: args.depth, ...(args.file ? { file: args.file } : {}) },
+    { name: args.name, depth: args.depth, summary: false, ...(args.file ? { file: args.file } : {}) },
     scanner,
     cache
   );

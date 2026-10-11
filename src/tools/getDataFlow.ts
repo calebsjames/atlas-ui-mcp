@@ -44,11 +44,31 @@ export interface DataFlowChain {
 
 export interface DataFlowResult extends Partial<SymbolMatch> {
   target: string;
+  /**
+   * "summary" when the full trace was too large (or `summary: true`): chains
+   * are replaced by chainCount + per-owner counts. allEndpoints stays complete.
+   */
+  mode?: "summary";
+  /** Why the result was summarized, and how to get the full chains. */
+  summaryNote?: string;
+  chainCount?: number;
+  /** Summary mode: one row per component that owns chains (render path in `via`). */
+  owners?: Array<{ component: string; via?: string; chains: number; endpoints: number }>;
+  /** Summary mode: the distinct composables/stores/services/adapters on the traced paths. */
+  composables?: string[];
+  stores?: string[];
+  services?: string[];
+  adapters?: string[];
+  /** Set (true) on an EMPTY result: the target resolved; `reason` says why nothing was traced. */
+  resolved?: true;
+  relativePath?: string;
+  reason?: string;
   /** Endpoints the matched secondary export itself owns, when attributable. */
   symbolEndpoints?: string[];
   /** Other catalog nodes the name matched; this trace auto-picked one. */
   alsoMatched?: AlsoMatched[];
-  chains: DataFlowChain[];
+  /** Absent in summary mode (see chainCount / owners). */
+  chains?: DataFlowChain[];
   /** Union of every endpoint reachable from rendering the target (incl. children). */
   allEndpoints: string[];
   /** How deep into the child tree the trace went. */
@@ -58,6 +78,8 @@ export interface DataFlowResult extends Partial<SymbolMatch> {
 }
 
 const DEFAULT_DEPTH = 3;
+/** Above this many serialized characters a trace is summarized unless summary:false. */
+export const DATA_FLOW_SUMMARY_THRESHOLD = 20_000;
 // Backstop against pathological render trees; the visited set already bounds work.
 const MAX_NODES = 300;
 
@@ -73,7 +95,7 @@ const MAX_NODES = 300;
  * what the page really loads.
  */
 export async function getDataFlow(
-  args: { name: string; depth?: number; file?: string },
+  args: { name: string; depth?: number; file?: string; summary?: boolean },
   scanner: ComponentScanner,
   cache: CacheManager
 ): Promise<DataFlowResult | AmbiguousMatch | NameNotFound> {
@@ -161,7 +183,7 @@ export async function getDataFlow(
   const symbolEndpoints =
     !sym.isPrimaryExport && sym.matchedExport ? target.endpointsByMethod?.[sym.matchedExport] : undefined;
 
-  return {
+  const full: DataFlowResult = {
     target: sym.matchedExport ?? target.name,
     ...(sym.isPrimaryExport ? {} : sym),
     ...(symbolEndpoints?.length ? { symbolEndpoints } : {}),
@@ -171,6 +193,75 @@ export async function getDataFlow(
     depth: maxDepth,
     ...(truncated ? { truncated } : {}),
   };
+
+  if (uniqueChains.length === 0) {
+    // An empty trace must not look like a lookup miss (that is `found: false`).
+    return {
+      ...full,
+      resolved: true,
+      relativePath: target.relativePath,
+      reason: emptyReason(target, maxDepth, visited.size),
+    };
+  }
+
+  if (args.summary === false) return full;
+  const size = JSON.stringify(full).length;
+  if (args.summary !== true && size <= DATA_FLOW_SUMMARY_THRESHOLD) return full;
+  return summarize(full, uniqueChains, size, args.summary === true);
+}
+
+/** Collapse chains into per-owner counts; keep the complete endpoint union. */
+function summarize(
+  full: DataFlowResult,
+  chains: DataFlowChain[],
+  size: number,
+  requested: boolean
+): DataFlowResult {
+  const owners = new Map<string, { component: string; via?: string; chains: number; endpoints: Set<string> }>();
+  const names = { composables: new Set<string>(), stores: new Set<string>(), services: new Set<string>(), adapters: new Set<string>() };
+  for (const c of chains) {
+    const via = c.via?.length ? c.via.join(" > ") : undefined;
+    const key = `${c.component.name}|${via ?? ""}`;
+    let o = owners.get(key);
+    if (!o) owners.set(key, (o = { component: c.component.name, ...(via ? { via } : {}), chains: 0, endpoints: new Set() }));
+    o.chains++;
+    c.endpoints.forEach((e) => o!.endpoints.add(e));
+    c.composables.forEach((s) => names.composables.add(s.name));
+    c.stores.forEach((s) => names.stores.add(s.name));
+    c.services.forEach((s) => names.services.add(s.name));
+    c.adapters.forEach((s) => names.adapters.add(s.name));
+  }
+  const { chains: _omit, ...rest } = full;
+  return {
+    ...rest,
+    mode: "summary",
+    summaryNote: requested
+      ? "Summary requested. Pass summary:false for every chain."
+      : `The full trace is ${size} characters (> ${DATA_FLOW_SUMMARY_THRESHOLD}), so chains are summarized. ` +
+        "Pass summary:false for every chain, or trace a child (owners lists them) for its detail.",
+    chainCount: chains.length,
+    owners: [...owners.values()].map((o) => ({
+      component: o.component,
+      ...(o.via ? { via: o.via } : {}),
+      chains: o.chains,
+      endpoints: o.endpoints.size,
+    })),
+    composables: [...names.composables].sort(),
+    stores: [...names.stores].sort(),
+    services: [...names.services].sort(),
+    adapters: [...names.adapters].sort(),
+  };
+}
+
+/** Why a resolved target traced to nothing — the opposite of "not found". */
+function emptyReason(target: Component, depth: number, visited: number): string {
+  return (
+    `${target.name} (${target.relativePath}, layer "${target.architectureLayer}") resolved, but no ` +
+    `service/adapter/store calls or own endpoints were found in it` +
+    (visited > 1 ? ` or in the ${visited - 1} child component(s) traced to depth ${depth}` : "") +
+    ". Either it genuinely fetches nothing (UI-only, an event bus, a pure helper), or it fetches " +
+    "through something static analysis can't follow (a dynamic URL, an injected client)."
+  );
 }
 
 /**
