@@ -58,7 +58,7 @@ export const CATALOG_TOOLS = [
   {
     name: "get_component_props",
     description:
-      "Get TypeScript prop interface for a specific component. Returns prop names, types, required status, default values, and JSDoc descriptions. Supports both interface and type alias prop definitions. Provide either `name` (catalog lookup) or `componentPath` (file path). If the result is `ambiguous`, re-call with `file` to disambiguate.",
+      "Get the DECLARED TypeScript prop interface for a specific component — prop names, types, required status, default values, and JSDoc descriptions. Supports both interface and type alias prop definitions. Provide either `name` (catalog lookup) or `componentPath` (file path). If the result is `ambiguous`, re-call with `file` to disambiguate. This is the contract, not the traffic: for the prop VALUES actually passed at each mount site (which of three call sites passes scope=\"all\"), use find_component_usages, whose template usages carry staticProps/boundProps.",
     inputSchema: {
       type: "object",
       properties: {
@@ -169,14 +169,16 @@ export const CATALOG_TOOLS = [
   {
     name: "find_component_usages",
     description:
-      "Find where a component, hook, or service is used (imported and rendered in templates/JSX) across the entire codebase. Searches components, pages, hooks, services, etc. Returns files, parent items, and line numbers with usage type (template, jsx, or import). Useful for impact analysis.",
+      "Find where ANY exported symbol is used across the codebase — a component mounted in a template/JSX, a hook/composable called, or a plain exported function (DTO predicates, utils) called. Works for symbols that are not the primary export of their file. Returns { symbol, resolution, externalUsageCount, selfModuleUsageCount, usages, siblingExports?, suggestions?, caveats }. " +
+      "`resolution.status` distinguishes `indexed` / `indexed-as-export` (the symbol exists — an empty usages list is a real 'unused') from `not-in-catalog` (the lookup missed; `suggestions` lists near-matches). Each usage has file, parent item, line, and usageType `template` | `jsx` | `import` | `call`; usages inside the declaring module are marked `scope: \"self-module\"`. " +
+      "PROPS AT THE MOUNT SITE (Vue SFCs): each template usage carries `staticProps` (literal values actually passed, e.g. scope=\"all\"), `boundProps` / `vModelProps` (the expression SOURCE for `:prop=\"x\"` — a pointer into that file's script, NOT a value), `flagProps` (valueless attributes), `spreadProps` (`v-bind=\"obj\"`, an unknown set), and `renderedWhen` (the governing v-if/v-show/v-for). Use this — not get_component_props, which reports the DECLARED interface — to learn which literal each mount site passes.",
     inputSchema: {
       type: "object",
       properties: {
         name: {
           type: "string",
           description:
-            'Name to search for (e.g., "Button", "useHandoffState", "patientService")',
+            'Symbol to search for — component, hook, service, or plain exported function (e.g., "Button", "useHandoffState", "isOrderItemSettled")',
         },
       },
       required: ["name"],
@@ -240,7 +242,7 @@ export const CATALOG_TOOLS = [
   {
     name: "get_hook_detail",
     description:
-      "Get detailed information about a custom hook or Vue composable. Returns parameters, return type, query keys, adapter/service calls, data fetching pattern, and which components use this hook/composable. If the name matches multiple hooks, returns `ambiguous` with candidates — re-call with `file`.",
+      "Get detailed information about a custom hook or Vue composable. Resolves by SYMBOL NAME regardless of directory: a `use*`-named export is found whether it lives in src/composables/, src/services/, or anywhere else, and whether or not it is its file's primary export. Returns parameters, return type, query keys, adapter/service calls, data fetching pattern, which components use it, plus `architectureLayer` (the FILE's layer as indexed — a composable in src/services/ honestly reports `service`), `isPrimaryExport`, `siblingExports`, and a `caveat` flagging which fields are file-level rather than symbol-scoped. If the name matches multiple hooks, returns `ambiguous` with candidates — re-call with `file`. A name that resolves to nothing returns `found: false` WITH `suggestions` (near-matches, including matches on other modules' exported symbols) — never a bare miss.",
     inputSchema: {
       type: "object",
       properties: {

@@ -168,7 +168,23 @@ Works for **both Vue and React** off the same engine — a `.vue` `<script>` is 
 Full metadata dump for any item — props, hooks, state, children, event handlers, data fetching, `testIds` and `formFields` (drivable selectors for `capture_flow`), accessibility info, API endpoints, architecture layer.
 
 ### `find_component_usages`
-Find everywhere a component/hook/service is imported or rendered. Returns files, parent components, and line numbers. Also scans entry points (`App.tsx`, `main.tsx`, layouts) and route files that live outside scan targets. Good for impact analysis before making changes.
+Find everywhere **any exported symbol** is used — a component mounted in a template/JSX, a composable called, or a plain exported function (DTO predicates, utils) called. Works for symbols that aren't their file's primary export. Also scans entry points (`App.tsx`, `main.tsx`, layouts) and route files that live outside scan targets.
+
+Returns `{ symbol, resolution, externalUsageCount, selfModuleUsageCount, usages, siblingExports?, suggestions?, caveats }`:
+
+- **`resolution.status`** separates the two things an empty result can mean. `indexed` / `indexed-as-export` — the symbol exists, so zero usages is a real *unused*. `not-in-catalog` — the lookup missed; `suggestions` lists near-matches (including matches on other modules' exported symbols). Conflating these is what makes a wrong answer look like a right one.
+- **`usages[].usageType`** — `template` | `jsx` | `import` | `call`. Call sites are matched for every non-PascalCase name, so a helper reports where it is *called*, not just where it is imported. Hits inside the declaring module are marked `scope: "self-module"` and counted separately.
+- **`siblingExports`** — the declaring module's other exports with an import count each. A zero-usage symbol next to a heavily-used sibling is a different fact from a dead one.
+
+**Props at the mount site.** For Vue SFCs the mount sites come from the compiler AST, not a line regex, so each `template` usage also carries what is actually passed there:
+
+- `staticProps` — `scope="all"`: literal **values**, facts about that site
+- `boundProps` / `vModelProps` — `:scope="activeScope"`: the expression **source**. A pointer into that file's script, never presented as a value
+- `flagProps` — valueless attributes (`<Panel embedded />`); Vue passes `""`, which a Boolean-declared prop casts to `true`
+- `spreadProps` — `v-bind="obj"`: an unknown set of props
+- `renderedWhen` — the v-if/v-show/v-for governing that site
+
+This is the question `get_component_props` structurally cannot answer: it reports the *declared* interface, this reports the *traffic*. (Using the AST also drops the regex's false positives — a `<Tag>` inside a comment or a `ref<CustomerInfo | null>` type annotation is no longer a usage.)
 
 ### `whats_affected`
 The edit→verify glue. Give it changed files (or let it read `git status`) and it walks the dependency graph upstream to every affected component and page, maps those to routes, and returns concrete `check_page` / `render_component` suggestions. Edit → `whats_affected` → check exactly what matters.
@@ -199,6 +215,8 @@ Returns `{ containers, note? }`. Each container carries its `route` (when routed
 ### `get_hook_detail`
 Deep dive on a hook/composable — parameters, return type, query keys, adapter calls, data fetching pattern, and which components use it.
 
+Resolution is **by symbol name, not by directory**: a `use*`-named export is found whether it lives in `src/composables/`, `src/services/`, or anywhere else, and whether or not it is its file's primary export (the catalog indexes one node per file under a single name, so `useImpersonation` out of `impersonationService.ts` is reached through that module's exports). The answer stays honest about where the code actually sits: `architectureLayer` reports the **file's** layer as indexed (`service`, not a relabelled `hook`), `isPrimaryExport` / `modulePrimaryName` / `siblingExports` say what else shares the file, and `caveat` flags which fields are file-level rather than scoped to the symbol you asked about.
+
 ### `find_dead_code`
 Finds exported items that are never imported anywhere. Optionally filter by layer. Components referenced only from entry points or route files are correctly treated as live.
 
@@ -206,6 +224,8 @@ Finds exported items that are never imported anywhere. Optionally filter by laye
 Traces the full data path: component → composable/hook/store → service → adapter → API endpoint — **including endpoints fetched by child components** (a page rarely fetches everything itself). Store-mediated flows (Pinia/Zustand) surface in a `stores` step per chain. Walks the child render tree (bounded by `depth`, default 3, plus a cycle-guard). Each chain is tagged with the `via` render path that reached it, and `allEndpoints` gives the union of everything the rendered route hits. Saves you from manually chaining `get_component_detail` + `get_hook_detail` calls.
 
 > **Name collisions:** `get_component_detail`, `get_component_props`, `get_hook_detail`, `get_dependency_chain`, and `get_data_flow` return `{ ambiguous: true, candidates: [...] }` when a name matches multiple files. Instead of silently picking one, automatically re-calls with `file` (a path substring) to disambiguate.
+>
+> **Names that resolve to nothing** never come back bare. The same tools return `{ found: false, message, suggestions: [...] }`, and the suggestion scan covers **every module's exported symbols**, not just catalog node names — so a symbol that exists only as a file's secondary export comes back as a pointer (`matchedExport`) instead of a dead end. A silent miss is the most expensive answer this server can give.
 
 ## Runtime browser tools — let agents check their work
 

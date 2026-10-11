@@ -25,6 +25,22 @@ export async function ensureCatalog(
   return catalog;
 }
 
+/**
+ * The exported symbol of `c` that `name` refers to, matched case-insensitively.
+ * Falls back to the node's own name when that is what matched. `undefined` when
+ * the module neither is named `name` nor exports it.
+ *
+ * The catalog is per-FILE: one node carries one primary name plus the module's
+ * full `exportedNames`. Tools that answer questions about a SYMBOL must resolve
+ * through this, not through `c.name` — otherwise a secondary export silently
+ * answers with the primary export's data.
+ */
+export function resolveExportedName(c: Component, name: string): string | undefined {
+  const query = name.toLowerCase();
+  if (c.name.toLowerCase() === query) return c.name;
+  return (c.exportedNames || []).find((n) => n.toLowerCase() === query);
+}
+
 /** Does this component's path contain the `file` substring? No filter = match. */
 export function matchesFile(c: Component, file?: string): boolean {
   if (!file) return true;
@@ -151,11 +167,20 @@ export function isAmbiguousMatch(value: unknown): value is AmbiguousMatch {
 export interface NameNotFound {
   found: false;
   message: string;
-  suggestions: {
-    name: string;
-    relativePath: string;
-    architectureLayer: ArchitectureLayer;
-  }[];
+  suggestions: NameSuggestion[];
+}
+
+export interface NameSuggestion {
+  /** The catalog node's own (primary) name. */
+  name: string;
+  relativePath: string;
+  architectureLayer: ArchitectureLayer;
+  /**
+   * Set when the query matched one of the module's OTHER exported symbols
+   * rather than the node's own name — the name to retry with is this one, and
+   * `architectureLayer` describes the FILE it lives in, not the symbol's shape.
+   */
+  matchedExport?: string;
 }
 
 /** Type guard for the not-found sentinel returned by name resolution. */
@@ -168,45 +193,82 @@ export function isNameNotFound(value: unknown): value is NameNotFound {
 }
 
 /**
+ * Score one candidate name against the query. Lower is closer; `undefined`
+ * means "not close enough to suggest".
+ */
+function nameScore(query: string, candidate: string): number | undefined {
+  if (candidate.includes(query) || query.includes(candidate)) {
+    // Substring either way — strongest signal; closer lengths rank higher.
+    return Math.abs(candidate.length - query.length);
+  }
+  const distance = editDistance(query, candidate, 3);
+  if (distance > Math.min(3, Math.floor(query.length / 3))) return undefined;
+  return 10 + distance; // typo-range matches rank below substring matches
+}
+
+/**
  * Build the "no such name — did you mean?" result. Suggestions are catalog
  * items whose names contain the query (or vice versa) or sit within a small
  * edit distance, so a typo'd or partially-remembered name still lands.
+ *
+ * Every EXPORTED symbol of a module is scored, not just the node's own name.
+ * The catalog is per-FILE with one primary name, so a module's other exports
+ * (`useImpersonation` out of `impersonationService.ts`) are invisible to a
+ * name-only scan — which is what turned a resolvable symbol into a bare
+ * `found: false` with zero suggestions.
  */
 export function nameNotFound(name: string, cache: CacheManager): NameNotFound {
   const components = cache.getCatalog()?.components ?? [];
   const query = name.toLowerCase();
 
-  const scored: { c: Component; score: number }[] = [];
+  const scored: { suggestion: NameSuggestion; score: number }[] = [];
   const seen = new Set<string>();
   for (const c of components) {
     if (seen.has(c.relativePath)) continue;
-    const candidate = c.name.toLowerCase();
-    let score: number;
-    if (candidate.includes(query) || query.includes(candidate)) {
-      // Substring either way — strongest signal; closer lengths rank higher.
-      score = Math.abs(candidate.length - query.length);
-    } else {
-      const distance = editDistance(query, candidate, 3);
-      if (distance > Math.min(3, Math.floor(query.length / 3))) continue;
-      score = 10 + distance; // typo-range matches rank below substring matches
-    }
-    seen.add(c.relativePath);
-    scored.push({ c, score });
-  }
-  scored.sort((a, b) => a.score - b.score || a.c.name.localeCompare(b.c.name));
 
-  const suggestions = scored.slice(0, 5).map(({ c }) => ({
-    name: c.name,
-    relativePath: c.relativePath,
-    architectureLayer: c.architectureLayer,
-  }));
+    let best: { score: number; matchedExport?: string } | undefined;
+    const consider = (candidate: string, matchedExport?: string): void => {
+      const score = nameScore(query, candidate.toLowerCase());
+      if (score === undefined) return;
+      // An exact hit on a secondary export beats a fuzzy hit on the node name.
+      if (!best || score < best.score) best = { score, matchedExport };
+    };
+    consider(c.name);
+    if (c.fileAlias) consider(c.fileAlias);
+    for (const exported of c.exportedNames || []) {
+      if (exported.toLowerCase() === c.name.toLowerCase()) continue;
+      consider(exported, exported);
+    }
+    if (!best) continue;
+
+    seen.add(c.relativePath);
+    scored.push({
+      score: best.score,
+      suggestion: {
+        name: c.name,
+        relativePath: c.relativePath,
+        architectureLayer: c.architectureLayer,
+        ...(best.matchedExport ? { matchedExport: best.matchedExport } : {}),
+      },
+    });
+  }
+  scored.sort(
+    (a, b) => a.score - b.score || a.suggestion.name.localeCompare(b.suggestion.name)
+  );
+
+  const suggestions = scored.slice(0, 5).map((s) => s.suggestion);
+  const viaExport = suggestions.some((s) => s.matchedExport);
 
   return {
     found: false,
     message:
       `No catalog item is named "${name}".` +
       (suggestions.length
-        ? " Closest matches are listed in suggestions — retry with one of those names."
+        ? " Closest matches are listed in suggestions — retry with one of those names." +
+          (viaExport
+            ? " A suggestion carrying `matchedExport` matched on one of that module's OTHER exported symbols" +
+              " (the catalog names each file by a single primary export), so that file is still the place to look."
+            : "")
         : " Nothing similar found; use search_components or list_all_components to browse the catalog."),
     suggestions,
   };

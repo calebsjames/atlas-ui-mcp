@@ -23,6 +23,8 @@ export interface ModuleExports {
   primary?: string;
   /** Every exported symbol name — indexed so any export resolves by name. */
   names: string[];
+  /** The subset of `names` exported as types only (`export type { X }`). */
+  typeOnlyNames: string[];
 }
 
 /**
@@ -34,6 +36,12 @@ export interface ModuleExports {
  * Primary priority: a named default export (the file's main thing) → for hook
  * files, a `useX` export → an export whose name matches the filename → the
  * first PascalCase export → the first export.
+ *
+ * Type-only exports (`export type { X }`) are ranked LAST for the primary name:
+ * they export no runtime value, so letting one win made a re-exported type the
+ * catalog name of a module full of real functions. They stay in `names` (and so
+ * in the by-export index) — a module whose exports are all types is still named
+ * after one of them rather than falling back to its filename.
  */
 export function analyzeModuleExports(
   sourceFile: ts.SourceFile,
@@ -42,6 +50,7 @@ export function analyzeModuleExports(
 ): ModuleExports {
   let defaultName: string | undefined;
   const named: string[] = [];
+  const typeOnly = new Set<string>();
 
   for (const stmt of sourceFile.statements) {
     // export default <ident>   (not `export =`)
@@ -73,19 +82,23 @@ export function analyzeModuleExports(
           if (el.propertyName) defaultName ??= el.propertyName.text;
         } else {
           named.push(el.name.text);
+          // `export type { X }` (whole clause) or `export { type X }` (specifier).
+          if (stmt.isTypeOnly || el.isTypeOnly) typeOnly.add(el.name.text);
         }
       }
     }
   }
 
   const fileNorm = norm(fileBaseName);
-  const primary =
-    defaultName ??
-    (layerHint === "hook" ? named.find(isUseName) : undefined) ??
-    named.find((n) => norm(n) === fileNorm) ??
-    named.find(isPascal) ??
-    named[0];
+  // Value exports first; type-only exports are the fallback pool.
+  const values = named.filter((n) => !typeOnly.has(n));
+  const pick = (pool: string[]) =>
+    (layerHint === "hook" ? pool.find(isUseName) : undefined) ??
+    pool.find((n) => norm(n) === fileNorm) ??
+    pool.find(isPascal) ??
+    pool[0];
+  const primary = defaultName ?? pick(values) ?? pick(named);
 
   const names = [...new Set([...(defaultName ? [defaultName] : []), ...named])];
-  return { primary, names };
+  return { primary, names, typeOnlyNames: [...typeOnly] };
 }
