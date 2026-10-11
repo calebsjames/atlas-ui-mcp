@@ -62,11 +62,50 @@ export async function verifyDataFlow(
       section: args.section,
       params: args.params,
       defaultParams: browserConfig.routeParams,
+      ...(args.file ? { file: args.file } : {}),
     },
     routeAnalyzer,
     scanner,
     cache
   );
+
+  // Behind app state (a modal's v-if) and no actions to open it: page load
+  // would observe the ANCESTOR's traffic and report it as drift. Hand back the
+  // plan instead of a misleading verdict.
+  if (resolved.stateGated && !args.actions?.length) {
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            target: args.name,
+            verdict: "gated",
+            route: resolved.routePath,
+            url: resolved.url,
+            mountPath: resolved.mountPath,
+            captureFlowSteps: resolved.captureFlowSteps,
+            predictedEndpointCount: predicted.length,
+            notes:
+              `"${args.name}" is mounted behind app state (see mountPath), so loading ${resolved.url} ` +
+              "would not exercise it. Re-call with `actions` = the click(s) in captureFlowSteps " +
+              "(after the first step) to open it, then the network is compared.",
+          }),
+        },
+      ],
+    };
+  }
+
+  // Reached through an ancestor page: that page's own traffic is expected
+  // too, so predictions are the union; the target's own share is reported.
+  let ancestorPredicted: string[] = [];
+  if (resolved.mountPath) {
+    const ancestor = await getDataFlow(
+      { name: resolved.component, summary: false, depth: args.depth },
+      scanner,
+      cache
+    );
+    if (!("ambiguous" in ancestor) && !("found" in ancestor)) ancestorPredicted = ancestor.allEndpoints;
+  }
 
   const capture = await session.capture(resolved.url, {
     label: `dataflow-${args.name}`,
@@ -80,7 +119,11 @@ export async function verifyDataFlow(
   // Observed API calls, deduped by method + path (apps poll / repeat).
   const apiCalls = dedupeCalls(capture.requests.filter(isApiRequest));
 
-  const predictions = predicted.map(parseEndpoint).filter((pred) => pred.prefix);
+  const targetPredictions = predicted.map(parseEndpoint).filter((pred) => pred.prefix);
+  const predictions = [
+    ...targetPredictions,
+    ...ancestorPredicted.map(parseEndpoint).filter((pred) => pred.prefix),
+  ];
 
   type ObservedCall = {
     method: string;
@@ -112,6 +155,15 @@ export async function verifyDataFlow(
     }
   }
 
+  // Of the TARGET's own predicted endpoints, how many were observed.
+  const targetObserved = targetPredictions.filter((pred) =>
+    apiCalls.some((call) => {
+      const p = pathname(call.url);
+      return (p === pred.prefix || p.startsWith(pred.prefix + "/")) &&
+        (!pred.method || pred.method === call.method.toUpperCase());
+    })
+  ).length;
+
   const verdict =
     predicted.length === 0
       ? "no-prediction"
@@ -126,6 +178,12 @@ export async function verifyDataFlow(
       route: resolved.routePath,
       url: resolved.url,
       ...(resolved.viewSection ? { viewSection: resolved.viewSection } : {}),
+      ...(resolved.mountPath
+        ? {
+            mountPath: resolved.mountPath,
+            targetEndpoints: { predicted: targetPredictions.length, observed: targetObserved },
+          }
+        : {}),
       verdict,
       traceDepth: flow?.depth,
       predictedEndpointCount: predicted.length,

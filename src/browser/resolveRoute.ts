@@ -3,7 +3,15 @@ import type { ComponentScanner } from "../scanner/componentScanner.js";
 import type { CacheManager } from "../cache/cacheManager.js";
 import type { FlowAction } from "./types.js";
 import { getRouteMap, type RouteMapEntry } from "../tools/getRouteMap.js";
-import { findByLayers, ROUTE_OWNER_LAYERS } from "../tools/shared.js";
+import {
+  ensureCatalog,
+  findByLayers,
+  isAmbiguousMatch,
+  nameNotFound,
+  resolveName,
+  ROUTE_OWNER_LAYERS,
+} from "../tools/shared.js";
+import { captureFlowSkeleton, planMountPath, type MountHop } from "./mountPath.js";
 import { listSectionIds, planSectionReveal } from "./sectionReveal.js";
 import { toAbsoluteUrl } from "../util.js";
 
@@ -41,6 +49,16 @@ export interface ResolvedRoute {
     applied: boolean;
     note?: string;
   };
+  /**
+   * Set when no route renders the component directly: the path from the
+   * nearest routed ancestor (first) down to the target (last), each hop with
+   * the guard that mounts it and whether load + section reveals reach it.
+   */
+  mountPath?: MountHop[];
+  /** Some hop needs an app-state change (open a modal, select a row) — see captureFlowSteps. */
+  stateGated?: boolean;
+  /** Ready-to-run capture_flow `steps` that walk mountPath (TODO selectors where none is known). */
+  captureFlowSteps?: Array<Record<string, unknown>>;
 }
 
 /**
@@ -57,6 +75,8 @@ export async function resolveRoute(
     section?: string;
     params?: Record<string, string>;
     defaultParams?: Record<string, string>;
+    /** Path substring disambiguating a component name declared in several files. */
+    file?: string;
   },
   routeAnalyzer: RouteAnalyzer,
   scanner: ComponentScanner,
@@ -85,27 +105,13 @@ export async function resolveRoute(
     }
   }
 
-  let matchedChildName: string | undefined;
   if (!opts.route && opts.component) {
     const wanted = opts.component.toLowerCase();
-    match =
-      routes.find((r) => r.component.toLowerCase() === wanted) ||
-      routes.find((r) => r.component.toLowerCase().includes(wanted));
+    // Exact route-component match only. The old substring fallback let a
+    // short name ("Home") grab whichever page contained it.
+    match = routes.find((r) => r.component.toLowerCase() === wanted);
     if (!match) {
-      // Resolved via the parent page's child list — the child may sit behind a
-      // view-container gate on that page (handled below).
-      match = routes.find((r) =>
-        r.componentDetails?.childComponents.some((c) => c.toLowerCase() === wanted)
-      );
-      matchedChildName = match?.componentDetails?.childComponents.find(
-        (c) => c.toLowerCase() === wanted
-      );
-    }
-    if (!match) {
-      throw new Error(
-        `No route renders a component matching "${opts.component}". ` +
-          `Use get_route_map to see what's routable, or pass an explicit "route".`
-      );
+      return resolveViaMountPath(opts, params, routes, scanner, cache);
     }
   } else if (!match) {
     throw new Error('Provide either "component" or "route".');
@@ -113,17 +119,10 @@ export async function resolveRoute(
 
   const { url, filled, guessed } = fillSegments(opts.baseUrl, match.path, params);
 
-  // Reveal target: an explicit section id, or the child we resolved through a
-  // container's childComponents list. Either drives the section-reveal engine.
-  const target =
+  const reveal =
     opts.section != null
-      ? { sectionId: opts.section }
-      : matchedChildName
-        ? { child: matchedChildName }
-        : null;
-  const reveal = target
-    ? await revealOnRoute(match, url, target, cache)
-    : { url, revealActions: undefined, viewSection: undefined };
+      ? await revealOnRoute(match, url, { sectionId: opts.section }, cache)
+      : { url, revealActions: undefined, viewSection: undefined };
   const finalUrl = reveal.url;
   const revealActions = reveal.revealActions;
   const viewSection = reveal.viewSection;
@@ -274,4 +273,74 @@ export function setQueryParam(url: string, key: string, value: string): string {
     });
   pairs.push(`${encodeURIComponent(key)}=${encodeURIComponent(value)}`);
   return `${pathPart}?${pairs.join("&")}${hash}`;
+}
+
+/**
+ * No route renders the component: walk up to its nearest routed ancestor and
+ * reveal each hop that a URL query or section click can reach. A hop behind
+ * an app-state guard (a modal's `v-if`) can't be reached by navigation alone;
+ * the result says so (stateGated) and carries capture_flow steps for it.
+ */
+async function resolveViaMountPath(
+  opts: { baseUrl: string; component?: string; section?: string; file?: string },
+  params: Record<string, string>,
+  routes: RouteMapEntry[],
+  scanner: ComponentScanner,
+  cache: CacheManager
+): Promise<ResolvedRoute> {
+  const name = opts.component!;
+  const catalog = await ensureCatalog(scanner, cache);
+  const resolved = resolveName(cache.getByName(name), name, opts.file, { preferRenderable: true });
+  if (resolved === null) {
+    const nf = nameNotFound(name, cache);
+    throw new Error(
+      `No catalog component "${name}", so no route can render it.` +
+        (nf.suggestions.length
+          ? ` Did you mean: ${nf.suggestions.map((s) => s.matchedExport ?? s.name).join(", ")}?`
+          : " Use search_components to find it.")
+    );
+  }
+  if (isAmbiguousMatch(resolved)) {
+    throw new Error(
+      `"${name}" names ${resolved.candidates.length} files: ` +
+        resolved.candidates.map((c) => c.relativePath).join(", ") +
+        '. Pass "file" (a path substring) to pick one.'
+    );
+  }
+  const target = resolved.node;
+  const plan = await planMountPath(target, routes, catalog.components, cache);
+  if (!plan) {
+    throw new Error(
+      `No routed page mounts "${name}" (${target.relativePath}) — walked up to 8 levels of ` +
+        `renderers/consumers without reaching a route. It may be mounted dynamically, from the app ` +
+        `root only, or not at all; check find_component_usages, or pass an explicit "route".`
+    );
+  }
+
+  const { url: baseUrl, filled, guessed } = fillSegments(opts.baseUrl, plan.route.path, params);
+  let url = baseUrl;
+  for (const q of plan.query) url = setQueryParam(url, q.key, q.value);
+  let revealActions = [...plan.revealActions];
+  let viewSection: ResolvedRoute["viewSection"];
+  if (opts.section != null) {
+    const r = await revealOnRoute(plan.route, url, { sectionId: opts.section }, cache);
+    url = r.url;
+    revealActions = [...(r.revealActions ?? []), ...revealActions];
+    viewSection = r.viewSection;
+  }
+  const finalPlan = { ...plan, revealActions };
+
+  return {
+    url,
+    routePath: plan.route.path,
+    component: plan.route.component,
+    isProtected: plan.route.isProtected,
+    filledParams: filled,
+    guessedParams: guessed,
+    ...(revealActions.length ? { revealActions } : {}),
+    ...(viewSection ? { viewSection } : {}),
+    mountPath: plan.hops,
+    stateGated: plan.stateGated,
+    ...(plan.stateGated ? { captureFlowSteps: captureFlowSkeleton(finalPlan, url) } : {}),
+  };
 }

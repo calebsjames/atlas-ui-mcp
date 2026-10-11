@@ -45,14 +45,18 @@ export const BROWSER_TOOLS = [
   {
     name: "render_component",
     description:
-      "Render a catalog component in the running app and return a screenshot plus runtime diagnostics (console errors, uncaught exceptions, failed network requests). Resolves the component to its URL automatically via the route map — just name the component you changed. Use this to visually confirm a change actually works. Requires the dev server to be running.",
+      "Render a catalog component in the running app and return a screenshot plus runtime diagnostics (console errors, uncaught exceptions, failed network requests). Resolves the component to its URL automatically via the route map — just name the component you changed. A component no route renders (a modal, a tab, a composable via the components that consume it) is reached through its nearest ROUTED ancestor: the result's `mountPath` lists each hop with the guard that mounts it, URL-query and section-click reveals are applied automatically, and when a hop sits behind app state (a modal's `v-if`) `targetMounted` is false and `captureFlowSteps` is a ready-to-run capture_flow plan (activator clicks found in the template; `<TODO>` where none is). Use this to visually confirm a change actually works. Requires the dev server to be running.",
     inputSchema: {
       type: "object",
       properties: {
         component: {
           type: "string",
           description:
-            'Catalog component name to render (e.g., "PatientDetail"). The route map resolves it to a URL.',
+            'Catalog component name to render (e.g., "OrderDetail"). The route map resolves it to a URL — directly, or through the nearest routed ancestor (see mountPath).',
+        },
+        file: {
+          type: "string",
+          description: "Optional path substring choosing one file when the component name is declared in several.",
         },
         route: {
           type: "string",
@@ -119,7 +123,7 @@ export const BROWSER_TOOLS = [
   {
     name: "verify_data_flow",
     description:
-      "Render a component's route and check the REAL network traffic against the endpoints that static analysis (get_data_flow, including child components and stores) predicts. Matching is method-aware. The key output is `unexpectedApiCalls` — observed calls that map to NO predicted endpoint, i.e. real source-vs-runtime drift (dynamic URLs, app-level fetches, or genuine divergence). `verdict` is 'confirmed' when every observed call is accounted for. Pass `actions` to drive interactions (fill/click/...) before the network is read — that's how predicted MUTATION endpoints (POST/PUT/DELETE) get exercised and verified. Requires the dev server to be running.",
+      "Render a component's route and check the REAL network traffic against the endpoints that static analysis (get_data_flow, including child components and stores) predicts. Matching is method-aware. The key output is `unexpectedApiCalls` — observed calls that map to NO predicted endpoint, i.e. real source-vs-runtime drift (dynamic URLs, app-level fetches, or genuine divergence). `verdict` is 'confirmed' when every observed call is accounted for. Pass `actions` to drive interactions (fill/click/...) before the network is read — that's how predicted MUTATION endpoints (POST/PUT/DELETE) get exercised and verified. A target no route renders (modal, tab, composable) is reached through its nearest routed ancestor (`mountPath`); the ancestor's own predicted traffic is then expected too, and `targetEndpoints` reports how many of the TARGET's predicted endpoints were observed. When the target sits behind app state and no `actions` are given, it returns verdict `gated` with `captureFlowSteps` instead of navigating — pass those clicks as `actions`. Requires the dev server to be running.",
     inputSchema: {
       type: "object",
       properties: {

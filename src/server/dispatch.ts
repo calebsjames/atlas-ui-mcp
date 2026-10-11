@@ -171,6 +171,7 @@ const HANDLERS: Record<string, ToolHandler> = {
         fullPage: args?.fullPage as boolean | undefined,
         settleMs: args?.settleMs as number | undefined,
         public: args?.public as boolean | undefined,
+        file: args?.file as string | undefined,
       },
       ctx.browser, ctx.routeAnalyzer, ctx.scanner, ctx.cache, ctx.browserConfig
     ),

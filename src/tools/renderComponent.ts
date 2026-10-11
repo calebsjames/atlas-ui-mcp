@@ -20,6 +20,7 @@ export async function renderComponent(
     fullPage?: boolean;
     settleMs?: number;
     public?: boolean;
+    file?: string;
   },
   session: BrowserSession,
   routeAnalyzer: RouteAnalyzer,
@@ -35,6 +36,7 @@ export async function renderComponent(
       section: args.section,
       params: args.params,
       defaultParams: browserConfig.routeParams,
+      ...(args.file ? { file: args.file } : {}),
     },
     routeAnalyzer,
     scanner,
@@ -68,6 +70,23 @@ export async function renderComponent(
       "This route is marked protected — if you see a login/redirect, the app needs an authenticated session."
     );
   }
+  if (resolved.mountPath) {
+    const path = resolved.mountPath.map((h) => h.component).join(" > ");
+    if (resolved.stateGated) {
+      const gates = resolved.mountPath
+        .filter((h) => !h.revealed)
+        .map((h) => `${h.component} (${h.gate})`)
+        .join(", ");
+      notes.push(
+        `No route renders "${args.component}" directly; it mounts via ${path}. The screenshot shows ` +
+          `${resolved.component} with every URL/section reveal applied, but ${gates} sits behind app ` +
+          "state — the target is NOT on screen. Run capture_flow with captureFlowSteps (replace any " +
+          "<TODO> selector) to open it."
+      );
+    } else {
+      notes.push(`No route renders "${args.component}" directly; reached via ${path} (all hops revealed by URL/section).`);
+    }
+  }
   if (resolved.viewSection) {
     const vs = resolved.viewSection;
     const target = args.section ? `Section "${args.section}"` : `"${args.component}"`;
@@ -96,7 +115,9 @@ export async function renderComponent(
         filledParams: resolved.filledParams,
         isProtected: resolved.isProtected,
         ...(resolved.viewSection ? { viewSection: resolved.viewSection } : {}),
+        ...(resolved.mountPath ? { mountPath: resolved.mountPath, targetMounted: !resolved.stateGated } : {}),
       },
+      ...(resolved.captureFlowSteps ? { captureFlowSteps: resolved.captureFlowSteps } : {}),
       performed: capture.performed,
       notes,
       ...diagnostics(capture),
