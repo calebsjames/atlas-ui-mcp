@@ -29,6 +29,7 @@ import { verifyDataFlow } from "../tools/verifyDataFlow.js";
 import { captureFlow } from "../tools/captureFlow.js";
 import { inspectRenderedPage } from "../tools/inspectRenderedPage.js";
 import { whatsAffected } from "../tools/whatsAffected.js";
+import { serverInfo } from "../tools/serverInfo.js";
 
 /** Everything a tool handler might need, wired up once at startup. */
 export interface ToolContext {
@@ -40,6 +41,8 @@ export interface ToolContext {
   cache: CacheManager;
   routeAnalyzer: RouteAnalyzer;
   browser: BrowserSession;
+  /** Restart the file watcher after a refresh swaps in a new scanner (set by server.ts). */
+  restartWatcher?: () => Promise<void>;
 }
 
 type ToolArgs = Record<string, unknown> | undefined;
@@ -224,6 +227,8 @@ const HANDLERS: Record<string, ToolHandler> = {
       },
       ctx.browser, ctx.routeAnalyzer, ctx.scanner, ctx.cache, ctx.browserConfig
     ),
+
+  server_info: (args, ctx) => serverInfo({ refresh: args?.refresh as boolean | undefined }, ctx),
 
   whats_affected: (args, ctx) =>
     whatsAffected(

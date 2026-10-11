@@ -181,6 +181,16 @@ export class BrowserSession {
     return !!this.config.login;
   }
 
+  /** Login state for server_info: configured, logged in, or stuck on an error. */
+  loginState(): { configured: boolean; loggedIn: boolean; browserLaunched: boolean; error?: string } {
+    return {
+      configured: !!this.config.login,
+      loggedIn: this.loggedIn,
+      browserLaunched: !!this.browser,
+      ...(this.loginError ? { error: this.loginError } : {}),
+    };
+  }
+
   /**
    * Force-reset the auth session: drop the page AND context (clearing cookies +
    * storage), clear a stuck login error, then — if `relogin` — run the login

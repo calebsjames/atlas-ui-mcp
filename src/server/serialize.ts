@@ -17,7 +17,7 @@ const KEEP_EMPTY_TOP_LEVEL = new Set([
   "usages", "chains", "allEndpoints", "unexpectedApiCalls", "matchedSample", "affectedItems",
   "affectedRoutes", "changedFiles", "suggestedChecks", "containers", "sections", "suggestions",
   "candidates", "unusedExports", "unusedMethods", "dependsOn", "usedBy", "components", "mounted",
-  "unmatched", "findings", "divergences", "steps", "danglingListeners", "mountPath",
+  "unmatched", "findings", "divergences", "steps", "danglingListeners", "mountPath", "unscannedDirs",
 ]);
 
 export interface SerializeOptions {

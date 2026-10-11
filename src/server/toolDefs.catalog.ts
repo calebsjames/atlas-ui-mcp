@@ -342,6 +342,21 @@ export const CATALOG_TOOLS = [
     },
   },
   {
+    name: "server_info",
+    description:
+      "Which atlas-ui code is answering and against what: version, git sha + dirty flag of the atlas-ui install, dist build time vs this process's start (a `build.stale` note means the running server is OLDER than the build on disk — reconnect the MCP), workspaceRoot, the effective config, catalog size / lastScanned / byLayer / unscannedDirs (directories under src/ the catalog does not index), browser login state, and whether the dev server answers (HTTP status + page <title>). Pass refresh:true to reload the WHOLE .atlas-ui.json (scan targets, aliases, route files, browser) and rescan the catalog without restarting — use it after editing config, or when results look stale.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        refresh: {
+          type: "boolean",
+          description: "Reload the full config and rescan before reporting (default false).",
+        },
+      },
+      required: [],
+    },
+  },
+  {
     name: "whats_affected",
     description:
       "The edit→verify glue: given changed files (or auto-detected from git status when omitted), walk the dependency graph UPSTREAM to find every component/page affected by the change, map those to routes, and return concrete verification targets — ready-to-run check_page/render_component suggestions. Each changed file gets a risk classification (low/medium/high/critical with a scoring breakdown: layer, blast radius, routes reached, direct dependents) and the result carries an overallRisk; routes and suggested checks are ordered riskiest-first. Affected items carry gatedBy when they mount their dependency behind v-if/v-show/v-for (e.g. a modal) — drive that guard during verification or the change won't be exercised. Call it after editing to know exactly what to re-check in the browser and how carefully.",

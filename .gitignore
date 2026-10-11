@@ -6,3 +6,4 @@ dist/
 .claude/
 .atlas-ui/
 *.pptx
+build-test/

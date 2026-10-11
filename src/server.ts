@@ -57,17 +57,19 @@ const server = new Server(
   { capabilities: { tools: {} } }
 );
 
-// Setup file watcher for cache invalidation
+// Setup file watcher for cache invalidation. server_info {refresh:true}
+// swaps in a scanner built from the reloaded config, then restarts this.
 let stopWatching: (() => void) | null = null;
 
-ctx.scanner
-  .watch(() => {
+async function startWatcher(): Promise<void> {
+  stopWatching?.();
+  stopWatching = await ctx.scanner.watch(() => {
     console.error("File change detected, invalidating cache...");
     ctx.cache.invalidateCatalog();
-  })
-  .then((stop: () => void) => {
-    stopWatching = stop;
   });
+}
+ctx.restartWatcher = startWatcher;
+startWatcher().catch((err) => console.error("File watcher failed to start:", err));
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
 
