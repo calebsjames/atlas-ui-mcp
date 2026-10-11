@@ -263,6 +263,14 @@ export interface Component {
   // lookups so a non-primary export (e.g. `useLogin` from an auth module whose
   // primary is `AuthLoader`) is still reachable by name.
   exportedNames?: string[];
+
+  // Callable members reachable through the module's exports, `Owner.method` →
+  // 1-based line (class methods, object-literal methods, exported instances).
+  // Indexed for find_component_usages / find_dead_code at method level.
+  members?: Record<string, number>;
+  // Instance methods of exported classes (`Class.method` → line): looked up by
+  // find_component_usages, but never judged dead — instances are named elsewhere.
+  instanceMembers?: Record<string, number>;
 }
 
 /**

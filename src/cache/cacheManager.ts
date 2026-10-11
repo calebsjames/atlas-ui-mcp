@@ -1,6 +1,21 @@
 import crypto from "crypto";
 import type { ComponentCatalog, ComponentProps, Component } from "../types.js";
 
+/** One callable member (`Owner.method`) and the file node that declares it. */
+export interface MemberRef {
+  component: Component;
+  owner: string;
+  method: string;
+  qualified: string;
+  /** 1-based declaration line. */
+  line: number;
+  /**
+   * False for an instance method looked up through its class name: its
+   * callers use instances named elsewhere, so absence of `Class.m` proves nothing.
+   */
+  tracked: boolean;
+}
+
 /**
  * Cache Manager
  * In-memory cache with indexing for O(1) lookups and content-hash invalidation
@@ -29,6 +44,10 @@ export class CacheManager {
   // (e.g. `useLogin`) is reachable without shadowing a real component that owns
   // that name as its primary.
   private exportIndex: Map<string, Component[]> = new Map();
+  // Method-level index: `owner.method` and bare `method` (both lowercased) →
+  // the member and the file node declaring it.
+  private memberIndex: Map<string, MemberRef[]> = new Map();
+  private methodIndex: Map<string, MemberRef[]> = new Map();
 
   /**
    * Get cached catalog
@@ -63,6 +82,21 @@ export class CacheManager {
     // they never shadow a component that owns the name as its primary.
     if (primary && primary.length > 0) return primary;
     return this.exportIndex.get(key) || [];
+  }
+
+  /** Members named `Owner.method` (case-insensitive). */
+  getMember(qualified: string): MemberRef[] {
+    return this.memberIndex.get(qualified.toLowerCase()) || [];
+  }
+
+  /** Members whose METHOD name is `method`, across every owner (case-insensitive). */
+  getMembersByMethod(method: string): MemberRef[] {
+    return this.methodIndex.get(method.toLowerCase()) || [];
+  }
+
+  /** Every indexed member, for dead-method detection. */
+  allMembers(): MemberRef[] {
+    return [...this.memberIndex.values()].flat();
   }
 
   /**
@@ -197,6 +231,8 @@ export class CacheManager {
     this.fileImportIndex.clear();
     this.pathIndex.clear();
     this.exportIndex.clear();
+    this.memberIndex.clear();
+    this.methodIndex.clear();
   }
 
   private rebuildIndexes(catalog: ComponentCatalog): void {
@@ -221,6 +257,26 @@ export class CacheManager {
 
       for (const exportName of component.exportedNames || []) {
         this.addToIndex(this.exportIndex, exportName.toLowerCase(), component);
+      }
+
+      const memberEntries: Array<[string, number, boolean]> = [
+        ...Object.entries(component.members || {}).map(([q, l]): [string, number, boolean] => [q, l, true]),
+        ...Object.entries(component.instanceMembers || {}).map(([q, l]): [string, number, boolean] => [q, l, false]),
+      ];
+      for (const [qualified, line, tracked] of memberEntries) {
+        const dot = qualified.lastIndexOf(".");
+        const ref: MemberRef = {
+          component,
+          owner: qualified.slice(0, dot),
+          method: qualified.slice(dot + 1),
+          qualified,
+          line,
+          tracked,
+        };
+        const q = qualified.toLowerCase();
+        this.memberIndex.set(q, [...(this.memberIndex.get(q) || []), ref]);
+        const m = ref.method.toLowerCase();
+        this.methodIndex.set(m, [...(this.methodIndex.get(m) || []), ref]);
       }
 
       const importedNames = (component.imports || []).flatMap((imp) => imp.names);

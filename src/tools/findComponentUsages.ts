@@ -7,10 +7,11 @@ import {
   ensureCatalog,
   escapeRegex,
   filterByFile,
+  matchesFile,
   nameNotFound,
   type NameSuggestion,
 } from "./shared.js";
-import { CacheManager } from "../cache/cacheManager.js";
+import { CacheManager, type MemberRef } from "../cache/cacheManager.js";
 import { findTemplateMountSites, type TemplateMountSite } from "../analyzer/templateMountSites.js";
 import { loadReferenceContents } from "./referenceFiles.js";
 
@@ -23,7 +24,7 @@ export interface ComponentUsage {
    * - `import`  — the import statement that brings it in
    * - `call`    — a call site `name(...)`; how a plain function is actually used
    */
-  usageType: "jsx" | "import" | "template" | "call";
+  usageType: "jsx" | "import" | "template" | "call" | "reference";
   /** Present only on usages inside the module that declares the symbol. */
   scope?: "self-module";
   /** `prop="literal"` bound at this mount site — real values. */
@@ -52,7 +53,9 @@ export interface UsageResolution {
    * - `indexed-as-export`— the symbol is one of an indexed module's OTHER exports
    * - `not-in-catalog`   — no indexed module declares this name at all
    */
-  status: "indexed" | "indexed-as-export" | "not-in-catalog";
+  status: "indexed" | "indexed-as-export" | "indexed-as-member" | "not-in-catalog";
+  /** Member mode: the `Owner.method` members the query resolved to. */
+  members?: Array<{ name: string; file: string; line: number }>;
   /** Workspace-relative file(s) that declare the symbol, when indexed. */
   declaredIn?: string[];
   architectureLayer?: ArchitectureLayer;
@@ -133,6 +136,16 @@ export async function findComponentUsages(
 ): Promise<UsageReport> {
   const { name } = args;
   const catalog = await ensureCatalog(scanner, cache);
+
+  // Method level: `ProjectService.createProject`, or a bare method name that
+  // no module exports (`createProject`) but some class / adapter object has.
+  const memberRefs = name.includes(".")
+    ? cache.getMember(name)
+    : cache.getByName(name).length === 0
+      ? cache.getMembersByMethod(name)
+      : [];
+  const scopedRefs = args.file ? memberRefs.filter((r) => matchesFile(r.component, args.file)) : memberRefs;
+  if (scopedRefs.length) return findMemberUsages(name, scopedRefs, cache, workspaceRoot, config);
 
   const usages: ComponentUsage[] = [];
   const caveats: string[] = [];
@@ -421,6 +434,101 @@ function parseImports(
     out.push({ names, ...(resolvedPath ? { resolvedPath } : {}) });
   }
   return out;
+}
+
+/**
+ * Method-level usages: `Owner.method` (optionally `?.`) in every file that
+ * imports the owner's module or the owner by name, plus `this.method` /
+ * `Owner.method` inside the declaring module. `call` when invoked, `reference`
+ * when passed around (`const f = Owner.method`).
+ */
+async function findMemberUsages(
+  query: string,
+  refs: MemberRef[],
+  cache: CacheManager,
+  workspaceRoot: string,
+  config?: ProjectConfig
+): Promise<UsageReport> {
+  const usages: ComponentUsage[] = [];
+  const referenceFiles = await loadReferenceContents(workspaceRoot, config);
+
+  for (const ref of refs) {
+    const access = `\\s*\\??\\.\\s*${escapeRegex(ref.method)}\\b(\\s*\\()?`;
+    const external = new RegExp(`\\b${escapeRegex(ref.owner)}${access}`);
+    const internal = new RegExp(`\\b(?:this|${escapeRegex(ref.owner)})${access}`);
+    const scan = (content: string | null, file: string, component: string, self: boolean) => {
+      if (!content) return;
+      const lines = content.split("\n");
+      for (let i = 0; i < lines.length; i++) {
+        if (self && i + 1 === ref.line) continue; // the declaration itself
+        const m = (self ? internal : external).exec(lines[i]);
+        if (!m) continue;
+        usages.push({
+          file,
+          component,
+          line: i + 1,
+          usageType: m[1] ? "call" : "reference",
+          ...(self ? { scope: "self-module" as const } : {}),
+          resolvesTo: ref.qualified,
+        });
+      }
+    };
+
+    const importers = new Map<string, Component>();
+    for (const c of cache.getImportersOfFile(ref.component.relativePath)) importers.set(c.path, c);
+    for (const c of cache.getImportersOf(ref.owner)) importers.set(c.path, c);
+    importers.delete(ref.component.path);
+    for (const c of importers.values()) scan(await readFileSafe(c.path), c.relativePath, c.name, false);
+    scan(await readFileSafe(ref.component.path), ref.component.relativePath, ref.component.name, true);
+    for (const [rel, content] of referenceFiles) {
+      if (rel === ref.component.relativePath) continue;
+      scan(content, rel, path.basename(rel, path.extname(rel)), false);
+    }
+  }
+
+  const seen = new Set<string>();
+  const deduped = usages.filter((u) => {
+    const k = `${u.file}:${u.line}:${u.resolvesTo}`;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+  const externalUsageCount = deduped.filter((u) => u.scope !== "self-module").length;
+  const members = refs.map((r) => ({ name: r.qualified, file: r.component.relativePath, line: r.line }));
+  const declaredIn = [...new Set(refs.map((r) => r.component.relativePath))];
+
+  const caveats = [
+    `Method-level match: "${query}" resolved to ${members.map((m) => m.name).join(", ")}. ` +
+      "Usages are `Owner.method` (or `this.method` inside the declaring module) text matches in files " +
+      "that import the owner; each usage's `resolvesTo` names the member.",
+    "Not tracked: a renamed import (`import { X as Y }`), destructuring (`const { m } = X`), " +
+      "dynamic access (`X[name]`), or an instance stored under another name.",
+  ];
+  const untracked = refs.filter((r) => !r.tracked).map((r) => r.qualified);
+  if (untracked.length) {
+    caveats.push(
+      `${untracked.join(", ")} ${untracked.length > 1 ? "are INSTANCE methods" : "is an INSTANCE method"}: ` +
+        "callers go through instances named elsewhere (`const s = new X()`), which this text match " +
+        "cannot see — an empty list here is NOT 'unused'. Search for `.method(` instead."
+    );
+  } else if (externalUsageCount === 0) {
+    caveats.push("Zero usages outside the declaring module — likely unused (confirm with a grep before deleting).");
+  }
+
+  return {
+    symbol: query,
+    resolution: {
+      status: "indexed-as-member",
+      declaredIn,
+      architectureLayer: refs[0].component.architectureLayer,
+      members,
+      note: `${members.length} member(s) named "${query}" in ${declaredIn.join(", ")}.`,
+    },
+    externalUsageCount,
+    selfModuleUsageCount: deduped.length - externalUsageCount,
+    usages: deduped,
+    caveats,
+  };
 }
 
 /** Where the symbol is declared, and how confident we are that it exists at all. */

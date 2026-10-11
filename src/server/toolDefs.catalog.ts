@@ -172,6 +172,7 @@ export const CATALOG_TOOLS = [
       "Find where ANY exported symbol is used across the codebase — a component mounted in a template/JSX, a hook/composable called, or a plain exported function (DTO predicates, utils) called. Works for symbols that are not the primary export of their file. Returns { symbol, resolution, externalUsageCount, selfModuleUsageCount, usages, siblingExports?, suggestions?, caveats }. " +
       "`resolution.status` distinguishes `indexed` / `indexed-as-export` (the symbol exists — an empty usages list is a real 'unused') from `not-in-catalog` (the lookup missed; `suggestions` lists near-matches). Each usage has file, parent item, line, and usageType `template` | `jsx` | `import` | `call`; usages inside the declaring module are marked `scope: \"self-module\"`. " +
       "PROPS AT THE MOUNT SITE (Vue SFCs): each template usage carries `staticProps` (literal values actually passed, e.g. scope=\"all\"), `boundProps` / `vModelProps` (the expression SOURCE for `:prop=\"x\"` — a pointer into that file's script, NOT a value), `flagProps` (valueless attributes), `spreadProps` (`v-bind=\"obj\"`, an unknown set), and `renderedWhen` (the governing v-if/v-show/v-for). Use this — not get_component_props, which reports the DECLARED interface — to learn which literal each mount site passes. " +
+      "METHODS: `Owner.method` (e.g. `ProjectService.createProject`, `fittingAdapter.getSessions`) or a bare method name no module exports (`createProject`) resolves at method level (`resolution.status: \"indexed-as-member\"`, `members`), matching `Owner.method(` / `Owner.method` in importers of the owner and `this.method` inside it; each usage's `resolvesTo` names the member (usageType `call` or `reference`). " +
       "SAME NAME IN TWO FILES: when a name is declared in more than one file, every usage carries `resolvesTo` (the declaring file its import points at); pass `file` (a path substring) to scope the whole report to one declaration.",
     inputSchema: {
       type: "object",
@@ -267,7 +268,7 @@ export const CATALOG_TOOLS = [
   {
     name: "find_dead_code",
     description:
-      "Find dead code — exported components, hooks, services, and adapters that are never imported or used anywhere else in the codebase. Returns unused exports with reasons explaining why they appear unused. Useful for codebase cleanup.",
+      "Find dead code — exported components, hooks, services, and adapters that are never imported or used anywhere else in the codebase, AND class / adapter-object methods (`Owner.method`, `unusedMethods`) that nothing calls or references. Returns unused exports and methods with reasons; read `methodCaveat` (dynamic access and framework-invoked methods can look unused) and confirm with a grep before deleting.",
     inputSchema: {
       type: "object",
       properties: {

@@ -25,6 +25,22 @@ export interface ModuleExports {
   names: string[];
   /** The subset of `names` exported as types only (`export type { X }`). */
   typeOnlyNames: string[];
+  /**
+   * Callable members reachable through an export, keyed `Owner.method` → 1-based
+   * line: methods of an exported class (static or instance), function-valued
+   * properties of an exported object literal (`export const fooAdapter = {…}`),
+   * and the class methods behind an exported instance (`export const x = new C()`).
+   * Class members are not exports, so without this they had no usage index.
+   * Every entry here is callable through the named owner itself.
+   */
+  members: Record<string, number>;
+  /**
+   * INSTANCE methods of an exported class, as `Class.method` → line. Callers
+   * reach them through instances whose names are not known statically (made
+   * in another module, or a subclass), so they are listed for lookup but not
+   * judged dead.
+   */
+  instanceMembers: Record<string, number>;
 }
 
 /**
@@ -100,5 +116,92 @@ export function analyzeModuleExports(
   const primary = defaultName ?? pick(values) ?? pick(named);
 
   const names = [...new Set([...(defaultName ? [defaultName] : []), ...named])];
-  return { primary, names, typeOnlyNames: [...typeOnly] };
+  return { primary, names, typeOnlyNames: [...typeOnly], ...extractMembers(sourceFile, names) };
+}
+
+const isFn = (e: ts.Expression | undefined) => !!e && (ts.isArrowFunction(e) || ts.isFunctionExpression(e));
+
+/** `Owner.method` → line for the callable members of the exported owners. */
+function extractMembers(
+  sf: ts.SourceFile,
+  exported: string[]
+): { members: Record<string, number>; instanceMembers: Record<string, number> } {
+  const line = (n: ts.Node) => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1;
+  const exportedSet = new Set(exported);
+  // Per class: static members (callable as Class.m) and instance members.
+  const classMembers = new Map<string, Array<[string, number]>>();
+  const classStatics = new Map<string, Array<[string, number]>>();
+  const out: Record<string, number> = {};
+  const instanceOut: Record<string, number> = {};
+
+  for (const st of sf.statements) {
+    if (!ts.isClassDeclaration(st) || !st.name) continue;
+    const ms: Array<[string, number]> = [];
+    const statics: Array<[string, number]> = [];
+    for (const m of st.members) {
+      if (!m.name || !ts.isIdentifier(m.name)) continue; // skips #private and computed names
+      if (hasModifier(m, ts.SyntaxKind.PrivateKeyword)) continue;
+      const callable =
+        ts.isMethodDeclaration(m) ||
+        ts.isGetAccessorDeclaration(m) ||
+        (ts.isPropertyDeclaration(m) && isFn(m.initializer));
+      if (!callable) continue;
+      (hasModifier(m, ts.SyntaxKind.StaticKeyword) ? statics : ms).push([m.name.text, line(m)]);
+    }
+    classMembers.set(st.name.text, ms);
+    classStatics.set(st.name.text, statics);
+  }
+
+  const add = (owner: string, members: Array<[string, number]>) => {
+    for (const [m, l] of members) out[`${owner}.${m}`] ??= l;
+  };
+  for (const [cls, ms] of classMembers) {
+    if (!exportedSet.has(cls)) continue;
+    add(cls, classStatics.get(cls) ?? []);
+    for (const [m, l] of ms) instanceOut[`${cls}.${m}`] ??= l;
+  }
+
+  for (const st of sf.statements) {
+    if (!ts.isVariableStatement(st)) continue;
+    for (const d of st.declarationList.declarations) {
+      if (!ts.isIdentifier(d.name) || !exportedSet.has(d.name.text) || !d.initializer) continue;
+      let init: ts.Expression = d.initializer;
+      while (ts.isAsExpression(init) || ts.isSatisfiesExpression?.(init) || ts.isParenthesizedExpression(init)) {
+        init = (init as ts.AsExpression).expression;
+      }
+      const owner = d.name.text;
+      if (ts.isObjectLiteralExpression(init)) {
+        const ms: Array<[string, number]> = [];
+        for (const p of init.properties) {
+          if (!p.name || !ts.isIdentifier(p.name)) continue;
+          if (
+            ts.isMethodDeclaration(p) ||
+            ts.isShorthandPropertyAssignment(p) ||
+            (ts.isPropertyAssignment(p) && isFn(p.initializer))
+          ) {
+            ms.push([p.name.text, line(p)]);
+          }
+        }
+        add(owner, ms);
+      } else if (ts.isNewExpression(init) && ts.isIdentifier(init.expression)) {
+        add(owner, classMembers.get(init.expression.text) ?? []);
+      } else {
+        // An instance of a local class by other means: a typed binding
+        // (`export const x: C = …`) or a singleton accessor (`C.getInstance()`).
+        const typed =
+          d.type && ts.isTypeReferenceNode(d.type) && ts.isIdentifier(d.type.typeName)
+            ? d.type.typeName.text
+            : undefined;
+        const viaStatic =
+          ts.isCallExpression(init) &&
+          ts.isPropertyAccessExpression(init.expression) &&
+          ts.isIdentifier(init.expression.expression)
+            ? init.expression.expression.text
+            : undefined;
+        const cls = [typed, viaStatic].find((c) => c && classMembers.has(c));
+        if (cls) add(owner, classMembers.get(cls)!);
+      }
+    }
+  }
+  return { members: out, instanceMembers: instanceOut };
 }

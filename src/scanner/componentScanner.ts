@@ -185,7 +185,7 @@ export class ComponentScanner {
       const stats = await fs.stat(fullPath);
       const relativePath = path.relative(this.workspaceRoot, fullPath);
       const fileBaseName = entryName.replace(/\.(vue|tsx?|jsx?)$/, "");
-      const { name: componentName, exportedNames } = this.resolveComponentName(
+      const { name: componentName, exportedNames, members, instanceMembers } = this.resolveComponentName(
         content, fileBaseName, entryName, target.type
       );
 
@@ -218,6 +218,8 @@ export class ComponentScanner {
         component.fileAlias = fileBaseName;
       }
       if (exportedNames.length > 0) component.exportedNames = exportedNames;
+      if (members) component.members = members;
+      if (instanceMembers) component.instanceMembers = instanceMembers;
 
       return component;
   }
@@ -364,14 +366,26 @@ export class ComponentScanner {
     fileBaseName: string,
     fileName: string,
     layerHint: string
-  ): { name: string; exportedNames: string[] } {
+  ): {
+    name: string;
+    exportedNames: string[];
+    members?: Record<string, number>;
+    instanceMembers?: Record<string, number>;
+  } {
     if (!fileName.endsWith(".vue")) {
       try {
         const sf = ts.createSourceFile(
           fileName, content, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX
         );
-        const { primary, names } = analyzeModuleExports(sf, fileBaseName, layerHint);
-        if (primary) return { name: primary, exportedNames: names };
+        const { primary, names, members, instanceMembers } = analyzeModuleExports(sf, fileBaseName, layerHint);
+        if (primary) {
+          return {
+            name: primary,
+            exportedNames: names,
+            ...(Object.keys(members).length ? { members } : {}),
+            ...(Object.keys(instanceMembers).length ? { instanceMembers } : {}),
+          };
+        }
       } catch {
         // Unparseable — fall through to the regex extractor.
       }

@@ -10,6 +10,15 @@ export interface DeadCodeReport {
   unusedExports: DeadCodeEntry[];
   totalScanned: number;
   totalUnused: number;
+  /**
+   * Class / adapter-object methods (`Owner.method`) that nothing calls or
+   * references — not in an importer of the owner, not via `this.`/the owner
+   * inside their own module, not in an entry/route file.
+   */
+  unusedMethods?: Array<{ name: string; relativePath: string; architectureLayer: string; line: number; reason: string }>;
+  membersScanned?: number;
+  totalUnusedMethods?: number;
+  methodCaveat?: string;
 }
 
 /**
@@ -114,10 +123,61 @@ export async function findDeadCode(
     });
   }
 
+  // Method level: members of the scanned modules that nothing calls or references.
+  const candidatePaths = new Set(candidates.map((c) => c.path));
+  const members = cache.allMembers().filter((m) => candidatePaths.has(m.component.path));
+  const unusedMethods: NonNullable<DeadCodeReport["unusedMethods"]> = [];
+  // One declaration can be reachable under several owners (the class and an
+  // exported instance / alias of it): it is used if ANY of them is used.
+  const byDecl = new Map<string, typeof members>();
+  for (const m of members) {
+    const k = `${m.component.path}:${m.line}`;
+    byDecl.set(k, [...(byDecl.get(k) || []), m]);
+  }
+  const isUsed = (m: (typeof members)[number]): boolean => {
+    const access = `\\s*\\??\\.\\s*${escapeRegex(m.method)}\\b`;
+    const external = new RegExp(`\\b${escapeRegex(m.owner)}${access}`);
+    const importerPaths = new Set<string>([
+      ...cache.getImportersOfFile(m.component.relativePath).map((c) => c.path),
+      ...cache.getImportersOf(m.owner).map((c) => c.path),
+      ...referenceFiles.keys(),
+    ]);
+    importerPaths.delete(m.component.path);
+    if ([...importerPaths].some((p) => external.test(contentIndex.get(p) ?? ""))) return true;
+    const internal = new RegExp(`\\b(?:this|${escapeRegex(m.owner)})${access}`);
+    const lines = (contentIndex.get(m.component.path) ?? "").split("\n");
+    return lines.some((l, i) => i + 1 !== m.line && internal.test(l));
+  };
+  for (const all of byDecl.values()) {
+    // Only members callable through a statically named owner can be judged.
+    const group = all.filter((m) => m.tracked);
+    if (!group.length || group.some(isUsed)) continue;
+    const m = group[0];
+    unusedMethods.push({
+      name: m.qualified,
+      relativePath: m.component.relativePath,
+      architectureLayer: m.component.architectureLayer,
+      line: m.line,
+      reason:
+        `"${m.qualified}" is never called or referenced outside its declaration` +
+        (group.length > 1 ? ` (also reachable as ${group.slice(1).map((g) => g.qualified).join(", ")})` : ""),
+    });
+  }
+
   return {
     unusedExports: unusedExports.sort((a, b) => a.name.localeCompare(b.name)),
     totalScanned: candidates.length,
     totalUnused: unusedExports.length,
+    unusedMethods: unusedMethods.sort((a, b) => a.name.localeCompare(b.name)),
+    membersScanned: members.filter((m) => m.tracked).length,
+    totalUnusedMethods: unusedMethods.length,
+    methodCaveat:
+      "Methods are matched as `Owner.method` text in importers of the owner (and `this.`/`Owner.` " +
+      "inside the module). Only static methods, object-literal methods and in-module exported " +
+      "instances are judged — an instance method of a class instantiated elsewhere is never listed. " +
+      "A renamed import, destructuring, dynamic access, or framework-invoked " +
+      "methods (lifecycle hooks, interface implementations) can make a live method look unused — " +
+      "confirm with a grep before deleting.",
   };
 }
 
