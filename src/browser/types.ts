@@ -1,4 +1,5 @@
 /** Shared types for the browser/runtime-verification layer. */
+import type { WaitUntil } from "./quiet.js";
 
 export interface ConsoleEntry {
   type: string; // "error" | "warning" | "log" | ...
@@ -38,6 +39,11 @@ export interface CaptureResult {
   performed: string[];
   /** Set if an action failed; the screenshot still reflects the state reached. */
   actionError?: string;
+  /**
+   * Requests still in flight when the bounded quiet window gave up — the page
+   * rendered, but these had not finished (slow API, unrecognised long-poll).
+   */
+  pendingRequests?: string[];
   /** True if nothing went wrong: no page errors, console errors, or failed requests. */
   clean: boolean;
   durationMs: number;
@@ -46,8 +52,12 @@ export interface CaptureResult {
 export interface CaptureOptions {
   /** Filename stem for the screenshot (no extension). */
   label?: string;
-  /** Override wait strategy. "networkidle" is thorough but can hang on long-poll apps. */
-  waitUntil?: "load" | "domcontentloaded" | "networkidle";
+  /**
+   * Wait strategy (default "quiet": load + a bounded window with no short-lived
+   * request in flight, ignoring streams). "networkidle" hangs on apps that hold
+   * an SSE/websocket/long-poll connection.
+   */
+  waitUntil?: WaitUntil;
   /** Extra settle time in ms after load before screenshotting. */
   settleMs?: number;
   /** Capture the full scrollable page rather than just the viewport. */
@@ -98,6 +108,8 @@ export interface ResolvedFlowStep {
   noScreenshot?: boolean;
   /** Keep going to the next step even if an action in this one fails. */
   continueOnError?: boolean;
+  /** How this step's navigation decides it is done (default: the flow's, else "quiet"). */
+  waitUntil?: WaitUntil;
 }
 
 export interface FlowStepResult {
@@ -115,6 +127,8 @@ export interface FlowStepResult {
   pageErrors: string[];
   failedRequests: NetworkEntry[];
   requestCount: number;
+  /** Requests still in flight when this step's bounded quiet window gave up. */
+  pendingRequests?: string[];
   /**
    * The app API calls made during this step (xhr/fetch or `/api/` URLs),
    * deduped by method + path and capped, so mutation endpoints triggered by

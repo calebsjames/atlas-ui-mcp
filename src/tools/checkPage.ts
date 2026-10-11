@@ -1,6 +1,7 @@
 import type { BrowserSession } from "../browser/session.js";
 import { captureResponse, diagnostics, type McpContentResult } from "../browser/response.js";
 import { toAbsoluteUrl } from "../util.js";
+import type { WaitUntil } from "../browser/quiet.js";
 
 /**
  * The "did my change break anything" workhorse. Navigate to a URL (absolute,
@@ -12,7 +13,7 @@ export async function checkPage(
     url: string;
     fullPage?: boolean;
     settleMs?: number;
-    waitUntil?: "load" | "domcontentloaded" | "networkidle";
+    waitUntil?: WaitUntil;
     public?: boolean;
   },
   session: BrowserSession

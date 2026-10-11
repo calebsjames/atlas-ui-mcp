@@ -46,6 +46,7 @@ export function diagnostics(capture: CaptureResult) {
       url: r.url,
       failure: r.failure,
     })),
+    ...(capture.pendingRequests ? { pendingRequests: capture.pendingRequests } : {}),
     screenshotPath: capture.screenshotPath,
   };
 }

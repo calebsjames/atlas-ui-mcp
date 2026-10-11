@@ -63,6 +63,21 @@ export interface BrowserConfig {
    * via `${VAR}` interpolation in action `text` — never hard-code secrets here.
    */
   login?: BrowserLoginConfig;
+  /**
+   * URL patterns (substring, or glob with `*`) whose requests never hold a
+   * navigation's quiet window open — app-specific long-polls, analytics
+   * beacons, a stream the stream heuristics don't recognise. SSE (by Accept or
+   * Content-Type) and websockets are ignored without listing them here.
+   */
+  idleIgnore?: string[];
+  /** Consecutive ms with no blocking request that count as "settled" (default 500). */
+  quietMs?: number;
+  /** Upper bound on the post-load quiet wait (default 10000). */
+  quietMaxMs?: number;
+  /** A request in flight longer than this is treated as a long-poll and ignored (default 8000). */
+  longPollMs?: number;
+  /** page.goto timeout (default 30000). */
+  navigationTimeoutMs?: number;
 }
 
 /**

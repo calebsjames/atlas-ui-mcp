@@ -30,6 +30,17 @@ const ACTION_ITEM_SCHEMA = {
   required: ["type"],
 };
 
+// How a navigation decides it is done — shared by check_page and capture_flow.
+const WAIT_UNTIL_SCHEMA = {
+  type: "string",
+  enum: ["quiet", "load", "domcontentloaded", "networkidle"],
+  description:
+    'Navigation wait strategy. Default "quiet": wait for load, then for a bounded window (≤10 s) with no ' +
+    "short-lived request in flight — SSE/websocket streams, long-polls and browser.idleIgnore URLs are " +
+    'ignored, so an app holding a realtime stream still settles. "networkidle" never settles while such a ' +
+    "stream is open. A stalled wait lists the requests still in flight.",
+};
+
 export const BROWSER_TOOLS = [
   {
     name: "render_component",
@@ -95,11 +106,7 @@ export const BROWSER_TOOLS = [
           type: "number",
           description: "Extra milliseconds to wait after load before screenshotting (e.g. for animations).",
         },
-        waitUntil: {
-          type: "string",
-          enum: ["load", "domcontentloaded", "networkidle"],
-          description: "Navigation wait strategy (default networkidle).",
-        },
+        waitUntil: WAIT_UNTIL_SCHEMA,
         public: {
           type: "boolean",
           description:
@@ -176,6 +183,7 @@ export const BROWSER_TOOLS = [
               },
               label: { type: "string", description: "Human label for this step in the report." },
               settleMs: { type: "number", description: "Extra ms to wait after this step before screenshotting." },
+              waitUntil: { ...WAIT_UNTIL_SCHEMA, description: "This step's navigation wait strategy (overrides the flow-level waitUntil)." },
               noScreenshot: { type: "boolean", description: "Skip the screenshot for this step." },
               continueOnError: { type: "boolean", description: "Continue the flow even if an action in this step fails." },
             },
@@ -185,6 +193,7 @@ export const BROWSER_TOOLS = [
           type: "number",
           description: "Default extra ms to wait after each step before screenshotting (per-step settleMs overrides).",
         },
+        waitUntil: WAIT_UNTIL_SCHEMA,
         public: {
           type: "boolean",
           description:

@@ -7,6 +7,7 @@ import type { BrowserConfig } from "../types.js";
 import { resolveRoute } from "../browser/resolveRoute.js";
 import type { McpContentResult } from "../browser/response.js";
 import { toAbsoluteUrl } from "../util.js";
+import type { WaitUntil } from "../browser/quiet.js";
 
 export interface FlowStep {
   /** Navigation target for this step: a catalog component, a route path, or an absolute URL. */
@@ -26,6 +27,8 @@ export interface FlowStep {
   noScreenshot?: boolean;
   /** Continue the flow even if an action in this step fails. */
   continueOnError?: boolean;
+  /** This step's navigation wait strategy (default: the flow's, else "quiet"). */
+  waitUntil?: WaitUntil;
 }
 
 /**
@@ -35,7 +38,7 @@ export interface FlowStep {
  * login → fill form → submit → assert-next-screen works as one flow.
  */
 export async function captureFlow(
-  args: { steps: FlowStep[]; settleMs?: number; public?: boolean },
+  args: { steps: FlowStep[]; settleMs?: number; public?: boolean; waitUntil?: WaitUntil },
   session: BrowserSession,
   routeAnalyzer: RouteAnalyzer,
   scanner: ComponentScanner,
@@ -91,12 +94,14 @@ export async function captureFlow(
       settleMs: step.settleMs,
       noScreenshot: step.noScreenshot,
       continueOnError: step.continueOnError,
+      ...(step.waitUntil ? { waitUntil: step.waitUntil } : {}),
     });
   }
 
   const stepResults = await session.runFlow(resolved, {
     settleMs: args.settleMs,
     requireAuth: !args.public,
+    waitUntil: args.waitUntil,
   });
 
   const content: McpContentResult["content"] = [];
@@ -113,6 +118,7 @@ export async function captureFlow(
     failedRequests: r.failedRequests.map((f) => ({ method: f.method, url: f.url, failure: f.failure })),
     requestCount: r.requestCount,
     apiCalls: r.apiCalls,
+    ...(r.pendingRequests ? { pendingRequests: r.pendingRequests } : {}),
     screenshotPath: r.screenshotPath,
   }));
 

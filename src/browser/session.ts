@@ -13,6 +13,15 @@ import type {
 } from "./types.js";
 import { describeAction, runAction, toApiCalls } from "./actions.js";
 import { isApiRequest, summarizeJsonBody } from "./network.js";
+import {
+  blockingRequests,
+  DEFAULT_QUIET,
+  describeInflight,
+  isLongLivedRequest,
+  type InflightRequest,
+  type QuietOptions,
+  type WaitUntil,
+} from "./quiet.js";
 import { errMessage, toAbsoluteUrl } from "../util.js";
 
 /**
@@ -30,7 +39,12 @@ interface DiagBuffers {
   byUrl: Map<string, NetworkEntry>;
   /** In-flight response-body reads, awaited before a call slices diagnostics. */
   pending: Promise<void>[];
+  /** Requests issued but not yet finished/failed — what the quiet window watches. */
+  inflight: Map<unknown, InflightRequest>;
 }
+
+/** Default page.goto timeout (browser.navigationTimeoutMs overrides). */
+const DEFAULT_NAV_TIMEOUT_MS = 30_000;
 
 /**
  * Lazily-launched headless browser. The first browser tool call spins Chromium
@@ -51,6 +65,7 @@ export class BrowserSession {
   private primaryPage: Page | null = null;
   private primaryDiag: DiagBuffers | null = null;
   private outputDirAbs: string;
+  private diagByPage = new WeakMap<Page, DiagBuffers>();
 
   constructor(
     private readonly workspaceRoot: string,
@@ -202,7 +217,7 @@ export class BrowserSession {
     const login = this.config.login!;
     const url = toAbsoluteUrl(this.baseUrl, login.url);
     try {
-      await page.goto(url, { waitUntil: "networkidle", timeout: 30_000 });
+      await this.navigate(page, url, "quiet");
       for (const action of login.actions) {
         await runAction(page, resolveSecrets(action as FlowAction));
       }
@@ -234,11 +249,9 @@ export class BrowserSession {
     const mark = this.markDiag(diag);
 
     const start = Date.now();
+    let pendingRequests: string[] | undefined;
     try {
-      await page.goto(url, {
-        waitUntil: opts.waitUntil || "networkidle",
-        timeout: 30_000,
-      });
+      pendingRequests = await this.navigate(page, url, opts.waitUntil);
     } catch (err) {
       // A nav timeout still leaves a renderable page; record it and continue so
       // the agent gets a screenshot + whatever diagnostics accumulated.
@@ -259,6 +272,10 @@ export class BrowserSession {
         actionError = errMessage(err);
         break;
       }
+    }
+    // Let the requests those actions fired land in this call's slice.
+    if (opts.actions?.length && (opts.waitUntil ?? "quiet") === "quiet") {
+      pendingRequests = (await this.waitForQuiet(page)) ?? pendingRequests;
     }
 
     if (opts.settleMs) await page.waitForTimeout(opts.settleMs);
@@ -293,11 +310,68 @@ export class BrowserSession {
       requests,
       performed,
       actionError,
+      ...(pendingRequests?.length ? { pendingRequests } : {}),
       clean:
         consoleErrors.length === 0 &&
         pageErrors.length === 0 &&
         failedRequests.length === 0,
       durationMs,
+    };
+  }
+
+  /**
+   * Navigate `page` and wait per `waitUntil` (default `quiet`). `quiet` waits for
+   * `load`, then for a bounded window with no short-lived request in flight —
+   * streams (SSE, websockets), long-polls and `browser.idleIgnore` URLs never
+   * hold it open. Returns the requests still in flight when the bounded window
+   * gave up (not an error: the page rendered). A failed goto throws with the
+   * in-flight list appended, so a stall names its cause.
+   */
+  async navigate(page: Page, url: string, waitUntil: WaitUntil = "quiet"): Promise<string[] | undefined> {
+    const timeout = this.config.navigationTimeoutMs ?? DEFAULT_NAV_TIMEOUT_MS;
+    try {
+      await page.goto(url, { waitUntil: waitUntil === "quiet" ? "load" : waitUntil, timeout });
+    } catch (err) {
+      const diag = this.diagByPage.get(page);
+      const inflight = diag ? describeInflight(diag.inflight.values(), Date.now()) : [];
+      throw new Error(
+        `${errMessage(err).split("\n")[0]}` +
+          (inflight.length ? ` Still in flight: ${inflight.join("; ")}.` : "") +
+          (waitUntil === "networkidle"
+            ? ` networkidle never settles while a stream is open — use waitUntil "quiet" (the default).`
+            : "")
+      );
+    }
+    if (waitUntil === "quiet") return this.waitForQuiet(page);
+    return undefined;
+  }
+
+  /**
+   * Wait until no blocking request has been in flight for `quietMs`, bounded by
+   * `maxMs`. Returns the in-flight list when the bound was hit, else undefined.
+   */
+  private async waitForQuiet(page: Page): Promise<string[] | undefined> {
+    const diag = this.diagByPage.get(page);
+    if (!diag) return undefined;
+    const opts = this.quietOptions();
+    const start = Date.now();
+    let quietSince = Date.now();
+    while (Date.now() - start < opts.maxMs) {
+      const now = Date.now();
+      if (blockingRequests(diag.inflight.values(), now, opts).length > 0) quietSince = now;
+      else if (now - quietSince >= opts.quietMs) return undefined;
+      await page.waitForTimeout(50).catch(() => {});
+      if (page.isClosed()) return undefined;
+    }
+    const now = Date.now();
+    return describeInflight(blockingRequests(diag.inflight.values(), now, opts), now);
+  }
+
+  private quietOptions(): QuietOptions {
+    return {
+      quietMs: this.config.quietMs ?? DEFAULT_QUIET.quietMs,
+      maxMs: this.config.quietMaxMs ?? DEFAULT_QUIET.maxMs,
+      longPollMs: this.config.longPollMs ?? DEFAULT_QUIET.longPollMs,
     };
   }
 
@@ -325,7 +399,7 @@ export class BrowserSession {
    */
   async runFlow(
     steps: ResolvedFlowStep[],
-    opts: { settleMs?: number; requireAuth?: boolean } = {}
+    opts: { settleMs?: number; requireAuth?: boolean; waitUntil?: WaitUntil } = {}
   ): Promise<FlowStepResult[]> {
     // Reuse the shared page so a configured login pre-step (and any prior tool
     // state) carries into the flow. Pass requireAuth:false for a public flow.
@@ -334,7 +408,7 @@ export class BrowserSession {
 
     for (let i = 0; i < steps.length; i++) {
       const step = steps[i];
-      const result = await this.runFlowStep(page, diag, step, i, opts.settleMs);
+      const result = await this.runFlowStep(page, diag, step, i, opts.settleMs, opts.waitUntil);
       results.push(result);
       if (result.error && !step.continueOnError) break;
     }
@@ -348,20 +422,26 @@ export class BrowserSession {
     diag: DiagBuffers,
     step: ResolvedFlowStep,
     index: number,
-    defaultSettleMs?: number
+    defaultSettleMs?: number,
+    defaultWaitUntil?: WaitUntil
   ): Promise<FlowStepResult> {
     const mark = this.markDiag(diag);
     const performed: string[] = [];
     let error: string | undefined;
+    let pendingRequests: string[] | undefined;
+    const waitUntil = step.waitUntil ?? defaultWaitUntil ?? "quiet";
 
     try {
       if (step.url) {
-        await page.goto(step.url, { waitUntil: "networkidle", timeout: 30_000 });
+        pendingRequests = await this.navigate(page, step.url, waitUntil);
         performed.push(`navigated to ${step.url}`);
       }
       for (const action of step.actions || []) {
         await runAction(page, action);
         performed.push(describeAction(action));
+      }
+      if (step.actions?.length && waitUntil === "quiet") {
+        pendingRequests = (await this.waitForQuiet(page)) ?? pendingRequests;
       }
     } catch (err) {
       error = errMessage(err);
@@ -398,6 +478,7 @@ export class BrowserSession {
       pageErrors,
       failedRequests,
       requestCount: diag.requests.length - mark.rq,
+      ...(pendingRequests?.length ? { pendingRequests } : {}),
       // API calls made during THIS step only — the buffer slice since `mark`.
       apiCalls: toApiCalls(diag.requests.slice(mark.rq)),
       clean:
@@ -448,7 +529,10 @@ export class BrowserSession {
       requests: [],
       byUrl: new Map(),
       pending: [],
+      inflight: new Map(),
     };
+    this.diagByPage.set(page, d);
+    const idleIgnore = this.config.idleIgnore ?? [];
     page.on("console", (msg) => {
       const type = msg.type();
       const entry = { type, text: msg.text() };
@@ -464,8 +548,25 @@ export class BrowserSession {
       };
       d.requests.push(entry);
       d.byUrl.set(req.url() + req.method(), entry);
+      d.inflight.set(req, {
+        method: req.method(),
+        url: req.url(),
+        resourceType: req.resourceType(),
+        start: Date.now(),
+        longLived: isLongLivedRequest(
+          { url: req.url(), resourceType: req.resourceType(), accept: req.headers()["accept"] },
+          idleIgnore
+        ),
+      });
+    });
+    page.on("requestfinished", (req) => {
+      d.inflight.delete(req);
     });
     page.on("response", (res) => {
+      // A response that turns out to be a stream never "finishes" — stop
+      // counting it against the quiet window as soon as its headers say so.
+      const live = d.inflight.get(res.request());
+      if (live && /text\/event-stream/i.test(res.headers()["content-type"] || "")) live.longLived = true;
       const entry = d.byUrl.get(res.url() + res.request().method());
       if (!entry) return;
       entry.status = res.status();
@@ -502,6 +603,7 @@ export class BrowserSession {
       }
     });
     page.on("requestfailed", (req) => {
+      d.inflight.delete(req);
       d.failedRequests.push({
         url: req.url(),
         method: req.method(),

@@ -66,7 +66,7 @@ export async function inspectRenderedPage(
 
   const rendered = await session.withPage(async (page) => {
     try {
-      await page.goto(url, { waitUntil: "networkidle", timeout: 30_000 });
+      await session.navigate(page, url);
     } catch {
       // A slow/failed nav still leaves something to inspect; press on.
     }

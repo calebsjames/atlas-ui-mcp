@@ -4,6 +4,7 @@ import type { CacheManager } from "../cache/cacheManager.js";
 import type { RouteAnalyzer } from "../analyzer/routeAnalyzer.js";
 import type { BrowserSession } from "../browser/session.js";
 import type { ArchitectureLayer, BrowserConfig, ProjectConfig } from "../types.js";
+import type { WaitUntil } from "../browser/quiet.js";
 import { listAllComponents } from "../tools/listAllComponents.js";
 import { searchComponents } from "../tools/searchComponents.js";
 import { getComponentProps } from "../tools/getComponentProps.js";
@@ -175,7 +176,7 @@ const HANDLERS: Record<string, ToolHandler> = {
         url: requireStringArg(args, "url"),
         fullPage: args?.fullPage as boolean | undefined,
         settleMs: args?.settleMs as number | undefined,
-        waitUntil: args?.waitUntil as "load" | "domcontentloaded" | "networkidle" | undefined,
+        waitUntil: args?.waitUntil as WaitUntil | undefined,
         public: args?.public as boolean | undefined,
       },
       ctx.browser
@@ -200,6 +201,7 @@ const HANDLERS: Record<string, ToolHandler> = {
       {
         steps: (args?.steps as any[]) || [],
         settleMs: args?.settleMs as number | undefined,
+        waitUntil: args?.waitUntil as WaitUntil | undefined,
         public: args?.public as boolean | undefined,
       },
       ctx.browser, ctx.routeAnalyzer, ctx.scanner, ctx.cache, ctx.browserConfig
