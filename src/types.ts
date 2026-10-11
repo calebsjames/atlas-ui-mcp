@@ -59,7 +59,7 @@ export interface BrowserConfig {
   outputDir?: string;
   /**
    * Default concrete values for dynamic route segments when rendering,
-   * e.g. { id: "1", patientId: "demo" }. Per-call params override these.
+   * e.g. { id: "1", orderId: "demo" }. Per-call params override these.
    */
   routeParams?: Record<string, string>;
   /**

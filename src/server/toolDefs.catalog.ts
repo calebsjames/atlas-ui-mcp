@@ -39,7 +39,7 @@ export const CATALOG_TOOLS = [
         query: {
           type: "string",
           description:
-            'Search query - component name, keyword, or multi-word phrase (e.g., "patient card", "handoff button")',
+            'Search query - component name, keyword, or multi-word phrase (e.g., "order card", "checkout button")',
         },
         layer: {
           type: "string",
@@ -89,7 +89,7 @@ export const CATALOG_TOOLS = [
         description: {
           type: "string",
           description:
-            'Natural language description (e.g., "button for submitting forms", "hook that fetches patient data")',
+            'Natural language description (e.g., "button for submitting forms", "hook that fetches order data")',
         },
       },
       required: ["description"],
@@ -155,7 +155,7 @@ export const CATALOG_TOOLS = [
         name: {
           type: "string",
           description:
-            'Item name (e.g., "Button", "PatientDetail", "useHandoffState", "patientAdapter")',
+            'Item name (e.g., "Button", "OrderDetail", "useCart", "orderAdapter", "orderService")',
         },
         file: {
           type: "string",
@@ -180,7 +180,7 @@ export const CATALOG_TOOLS = [
         name: {
           type: "string",
           description:
-            'Symbol to search for — component, hook, service, or plain exported function (e.g., "Button", "useHandoffState", "isOrderItemSettled")',
+            'Symbol to search for — component, hook, service, or plain exported function (e.g., "Button", "useCart", "isOrderItemSettled", "OrderService.createOrder")',
         },
         file: {
           type: "string",
@@ -211,7 +211,7 @@ export const CATALOG_TOOLS = [
         name: {
           type: "string",
           description:
-            'Item name (e.g., "CompleteHandoffButton", "useHandoffState")',
+            'Item name (e.g., "CheckoutButton", "useCart")',
         },
         depth: {
           type: "number",
@@ -255,7 +255,7 @@ export const CATALOG_TOOLS = [
       properties: {
         name: {
           type: "string",
-          description: 'Hook name (e.g., "useHandoffState", "usePatientData")',
+          description: 'Hook name (e.g., "useCart", "useOrders")',
         },
         file: {
           type: "string",
@@ -368,7 +368,7 @@ export const CATALOG_TOOLS = [
           type: "array",
           items: { type: "string" },
           description:
-            'Workspace-relative changed files (e.g., ["src/hooks/useUsers.ts"]). Omit to auto-detect from git status.',
+            'Workspace-relative changed files (e.g., ["src/composables/useOrders.ts"]). Omit to auto-detect from git status.',
         },
         offset: {
           type: "number",

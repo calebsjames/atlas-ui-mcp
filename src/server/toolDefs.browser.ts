@@ -90,7 +90,7 @@ export const BROWSER_TOOLS = [
         route: {
           type: "string",
           description:
-            'Optional: render a raw route path directly instead (e.g., "/patients/:id"). Use instead of `component`.',
+            'Optional: render a raw route path directly instead (e.g., "/orders/:id"). Use instead of `component`.',
         },
         section: {
           type: "string",
@@ -164,7 +164,7 @@ export const BROWSER_TOOLS = [
       properties: {
         name: {
           type: "string",
-          description: 'Component or composable name whose data flow to verify (e.g., "PatientDetail").',
+          description: 'Component or composable name whose data flow to verify (e.g., "OrderDetail").',
         },
         file: {
           type: "string",
@@ -283,7 +283,7 @@ export const BROWSER_TOOLS = [
           type: "string",
           description: "Catalog component name whose route to open (resolved via the route map).",
         },
-        route: { type: "string", description: 'Route path to open (e.g., "/patients/:id").' },
+        route: { type: "string", description: 'Route path to open (e.g., "/orders/:id").' },
         url: { type: "string", description: "Absolute URL or dev-server-relative path to open." },
         section: {
           type: "string",

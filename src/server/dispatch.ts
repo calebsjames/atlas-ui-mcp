@@ -51,9 +51,51 @@ type ToolHandler = (args: ToolArgs, ctx: ToolContext) => Promise<unknown>;
 
 function requireStringArg(args: ToolArgs, key: string): string {
   if (!args || typeof args[key] !== "string") {
-    throw new Error(`Missing required argument: ${key} (string)`);
+    const got = Object.keys(args ?? {});
+    throw new Error(
+      `Missing required argument: ${key} (string)` + (got.length ? `. Received: ${got.join(", ")}.` : ".")
+    );
   }
   return args[key] as string;
+}
+
+/**
+ * Argument aliases — the tools grew different names for the same thing
+ * (`name` vs `component`), and a call with the "other" one failed outright.
+ * Each alias fills its canonical argument only when the canonical is absent.
+ */
+const NAME_ALIASES = ["component", "componentName", "symbol", "hook", "target"];
+const ARG_ALIASES: Record<string, Record<string, string[]>> = {
+  get_component_detail: { name: NAME_ALIASES, file: ["filePath"] },
+  find_component_usages: { name: NAME_ALIASES, file: ["filePath"] },
+  get_dependency_chain: { name: NAME_ALIASES, file: ["filePath"] },
+  get_hook_detail: { name: NAME_ALIASES, file: ["filePath"] },
+  get_data_flow: { name: NAME_ALIASES, file: ["filePath"] },
+  verify_data_flow: { name: NAME_ALIASES, file: ["filePath"] },
+  get_component_props: { name: NAME_ALIASES, componentPath: ["path", "filePath"] },
+  render_component: { component: ["name", "componentName"] },
+  inspect_rendered_page: { component: ["name", "componentName"] },
+  check_page: { url: ["route", "path", "href"] },
+  search_components: { query: ["q", "name", "search", "term"] },
+  find_similar_components: { description: ["query", "q", "text"] },
+  whats_affected: { files: ["file", "paths"] },
+  capture_flow: { steps: ["flow"] },
+};
+
+function normalizeArgs(tool: string, args: ToolArgs): ToolArgs {
+  const aliases = ARG_ALIASES[tool];
+  if (!aliases || !args) return args;
+  const out: Record<string, unknown> = { ...args };
+  for (const [canonical, alts] of Object.entries(aliases)) {
+    if (out[canonical] !== undefined) continue;
+    const alt = alts.find((a) => out[a] !== undefined);
+    if (!alt) continue;
+    out[canonical] = out[alt];
+    delete out[alt];
+  }
+  // `whats_affected({ file: "x.ts" })` — a single path where a list is expected.
+  if (tool === "whats_affected" && typeof out.files === "string") out.files = [out.files];
+  return out;
 }
 
 const HANDLERS: Record<string, ToolHandler> = {
@@ -289,7 +331,7 @@ export async function dispatchToolCall(name: string, args: ToolArgs, ctx: ToolCo
         );
       }
     }
-    const result = await handler(args, ctx);
+    const result = await handler(normalizeArgs(name, args), ctx);
     if (result && typeof result === "object" && Array.isArray((result as any).content)) {
       return compactContent(result as { content: unknown[] }, { workspaceRoot: ctx.workspaceRoot });
     }
