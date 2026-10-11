@@ -1,6 +1,6 @@
 {
   "name": "atlas-ui-mcp",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "Codebase-aware MCP server for UI development: static component/data-flow/route analysis plus runtime browser verification (render, flows, network-vs-source diff) for Vue and React apps",
   "type": "module",
   "main": "dist/server.js",
@@ -41,6 +41,7 @@
     "dist",
     "!dist/**/*.test.*",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "engines": {

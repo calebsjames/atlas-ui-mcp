@@ -38,7 +38,7 @@ Instead of Claude grep-ing around your codebase every time it needs to understan
 
 It auto-detects whether your project is React, Vue and sets up sensible scan targets accordingly. File watching keeps the cache fresh as you work.
 
-Catalog-wide listings and search results return compact summaries to keep token cost down; `get_component_detail` has the full metadata, and `list_all_components` accepts `verbose: true` when you really want everything. When a name matches multiple files, name-based tools return an `ambiguous` result with candidates instead of guessing — re-call with `file` (a path substring) to pick one.
+Catalog-wide listings and search results return compact summaries to keep token cost down; `get_component_detail` has the full metadata, and `list_all_components` accepts `verbose: true` when you really want everything. Every result is one-line JSON with empty nested arrays and absolute file paths dropped (each node keeps its `relativePath`). When a name matches multiple files, name-based tools pick an exact-case primary name (or, in component tools, the single renderable candidate) and list the rest under `alsoMatched`; otherwise they return an `ambiguous` result with candidates — re-call with `file` (a path substring) to pick one.
 
 ## Setup
 
@@ -136,6 +136,10 @@ Drop a `.atlas-ui.json` in your project root to customize scanning. If you don't
 
 **Nuxt** (when `nuxt` is a dependency) — the Vue defaults widen to Nuxt's root-level dirs (`components`, `layouts`, `pages`, `composables`, `stores`, `utils`) and their Nuxt 4 `app/`-nested equivalents.
 
+### Util fallback layer
+
+Beyond the scan targets, every `src/**/*.ts` module no target covers is indexed as layer `util` (`hook` when its primary export is `use*`) — so `src/constants`, `src/config`, `src/realtime`, `src/navigation` and friends are visible to every tool. Declarations, tests, barrel-only `index.ts` files and test scaffolding (`setup-tests`, `test/`, `testing/`, `__mocks__/`, `fixtures/`) are skipped. Set `"fallbackScan": false` to turn it off. The catalog always reports `unscannedDirs` — directories under `src/` with source files it does **not** index — on `list_all_components`, `get_architecture_overview` and `server_info`.
+
 ### Scan coverage warning
 
 Layout conventions are unbounded, so no default list can cover them all — but a scan that misses the app should say so instead of returning a near-empty catalog that reads as "this app has no components". After every scan, the server checks for UI source files (`.tsx`/`.jsx`/`.vue`) that no scan target covers. When the misses outweigh the catalog (or the catalog is empty), `list_all_components` and `get_architecture_overview` include a `coverageWarning` naming the heaviest uncovered directories, so the fix is a copy-paste `scanTargets` entry in `.atlas-ui.json`. Files owned by file-based routing (Next App Router special files, `pages/` routes) don't count as missed.
@@ -167,6 +171,8 @@ Works for **both Vue and React** off the same engine — a `.vue` `<script>` is 
 ### `get_component_detail`
 Full metadata dump for any item — props, hooks, state, children, event handlers, data fetching, `testIds` and `formFields` (drivable selectors for `capture_flow`), accessibility info, API endpoints, architecture layer.
 
+It is **symbol-honest** (so are `get_dependency_chain`, `get_data_flow` and `get_component_props`): asking for a module's *secondary* export (`isOrderItemSettled` in a file whose catalog name is `OUTSTANDING_ORDER_ITEM_STATUSES`) answers about that symbol — its own `name`, `line` and JSDoc `description` — with `isPrimaryExport: false`, `matchedExport`, `modulePrimaryName`, `siblingExports`, and a `caveat` naming which fields are file-level. `get_dependency_chain` scopes `usedBy` to files importing that symbol.
+
 ### `find_component_usages`
 Find everywhere **any exported symbol** is used — a component mounted in a template/JSX, a composable called, or a plain exported function (DTO predicates, utils) called. Works for symbols that aren't their file's primary export. Also scans entry points (`App.tsx`, `main.tsx`, layouts) and route files that live outside scan targets.
 
@@ -175,6 +181,8 @@ Returns `{ symbol, resolution, externalUsageCount, selfModuleUsageCount, usages,
 - **`resolution.status`** separates the two things an empty result can mean. `indexed` / `indexed-as-export` — the symbol exists, so zero usages is a real *unused*. `not-in-catalog` — the lookup missed; `suggestions` lists near-matches (including matches on other modules' exported symbols). Conflating these is what makes a wrong answer look like a right one.
 - **`usages[].usageType`** — `template` | `jsx` | `import` | `call`. Call sites are matched for every non-PascalCase name, so a helper reports where it is *called*, not just where it is imported. Hits inside the declaring module are marked `scope: "self-module"` and counted separately.
 - **`siblingExports`** — the declaring module's other exports with an import count each. A zero-usage symbol next to a heavily-used sibling is a different fact from a dead one.
+- **Same name in two files** — every usage carries `resolvesTo` (the declaring file its import points at); pass `file` to scope the report to one declaration.
+- **Methods** — `ProjectService.createProject`, or a bare method name no module exports (`createProject`), resolves at method level (`resolution.status: "indexed-as-member"`): `Owner.method` call sites (`usageType` `call` or `reference`) in importers of the owner, each tagged with the member it `resolvesTo`.
 
 **Props at the mount site.** For Vue SFCs the mount sites come from the compiler AST, not a line regex, so each `template` usage also carries what is actually passed there:
 
@@ -210,6 +218,8 @@ Returns `{ containers, note? }`. Each container carries its `route` (when routed
 
 `note` (present only on an empty result) explains why nothing was found. A fully route-based app returns no containers — this tool adds signal exactly where the route map goes quiet.
 
+Gates are parsed as expressions (TypeScript AST), not matched by regex: `view === 'a' || view === 'b'` — including multi-line `||` chains — yields one section per literal; an `&&` compound (`section === 'Projects' && tab === 'Club Fittings'`) yields a section whose `conditions` lists every `{var: value}` it needs (non-equality conjuncts land in `alsoRequires`; a second element rendered for the same section in `alsoRenders`). `queryParam` is reported only when the URL value actually **flows into** the variable (initialiser, `watch` callback, a local function — including a validating identity like `resolveSection(v)`); a value mapped through a lookup table is not URL-reachable by its literal. The ids are the exact literals the app compares (case-sensitive in the app); the runtime tools' `section` argument matches them case-, whitespace-, `-`/`_`-insensitively and errors with the valid ids when nothing matches.
+
 **Driving to a section.** The runtime tools consume this map so you don't have to wire the click yourself. `render_component`, `verify_data_flow`, `inspect_rendered_page`, and each `capture_flow` step take a `section` argument (or you can just name the section's `child` component) — the tool navigates to the container's route and then reveals the section automatically: it appends the query param for a `query` section, or clicks the `activator` for a `click` section, *before* it screenshots and reads the network. So a section's own render, console, and API calls (with Phase-1 row counts) are what get captured — no guessed sidebar clicks.
 
 ### `get_hook_detail`
@@ -218,23 +228,35 @@ Deep dive on a hook/composable — parameters, return type, query keys, adapter 
 Resolution is **by symbol name, not by directory**: a `use*`-named export is found whether it lives in `src/composables/`, `src/services/`, or anywhere else, and whether or not it is its file's primary export (the catalog indexes one node per file under a single name, so `useImpersonation` out of `impersonationService.ts` is reached through that module's exports). The answer stays honest about where the code actually sits: `architectureLayer` reports the **file's** layer as indexed (`service`, not a relabelled `hook`), `isPrimaryExport` / `modulePrimaryName` / `siblingExports` say what else shares the file, and `caveat` flags which fields are file-level rather than scoped to the symbol you asked about.
 
 ### `find_dead_code`
-Finds exported items that are never imported anywhere. Optionally filter by layer. Components referenced only from entry points or route files are correctly treated as live.
+Finds exported items that are never imported anywhere. Optionally filter by layer. Components referenced only from entry points or route files are correctly treated as live. Also reports `unusedMethods` — static class methods, object-literal adapter methods and in-module instance methods that nothing calls or references (an instance method of a class instantiated elsewhere is never judged; read `methodCaveat`).
 
 ### `get_data_flow`
 Traces the full data path: component → composable/hook/store → service → adapter → API endpoint — **including endpoints fetched by child components** (a page rarely fetches everything itself). Store-mediated flows (Pinia/Zustand) surface in a `stores` step per chain. Walks the child render tree (bounded by `depth`, default 3, plus a cycle-guard). Each chain is tagged with the `via` render path that reached it, and `allEndpoints` gives the union of everything the rendered route hits. Saves you from manually chaining `get_component_detail` + `get_hook_detail` calls.
 
-> **Name collisions:** `get_component_detail`, `get_component_props`, `get_hook_detail`, `get_dependency_chain`, and `get_data_flow` return `{ ambiguous: true, candidates: [...] }` when a name matches multiple files. Instead of silently picking one, automatically re-calls with `file` (a path substring) to disambiguate.
+A whole shell page traces to hundreds of chains, so a result above ~20k characters comes back as `mode: "summary"` — `allEndpoints` (complete), `chainCount`, per-owner counts and the services/adapters on the path; pass `summary: false` for every chain. An empty trace carries `resolved: true` and a `reason`, so "traced, nothing fetched" never looks like "not found" (`found: false`).
+
+### `server_info`
+Which code is answering, against what: version, git sha + dirty flag of the atlas-ui install, build time vs this process's start (`build.stale` means the running server is older than the build on disk — reconnect the MCP), the workspace and effective config, catalog size / `lastScanned` / `unscannedDirs`, login state per profile, and a dev-server probe (status + `<title>`). `refresh: true` reloads the **whole** `.atlas-ui.json` and rescans without a restart.
+
+> **Name collisions:** `get_component_detail`, `get_component_props`, `get_hook_detail`, `get_dependency_chain`, and `get_data_flow` resolve a name that matches several files only when one candidate is clearly meant — an exact-case primary name beats a camelCase file alias, and the component tools prefer the single renderable candidate — and then list the others under `alsoMatched`. Otherwise they return `{ ambiguous: true, candidates: [...] }`; re-call with `file` (a path substring). The same node reached twice (name + case-only alias) is never reported as ambiguous.
 >
 > **Names that resolve to nothing** never come back bare. The same tools return `{ found: false, message, suggestions: [...] }`, and the suggestion scan covers **every module's exported symbols**, not just catalog node names — so a symbol that exists only as a file's secondary export comes back as a pointer (`matchedExport`) instead of a dead end. A silent miss is the most expensive answer this server can give.
 
 ## Runtime browser tools — let agents check their work
 
-The tools above understand your code statically. These five drive a real (headless) browser against your **running app**, so an agent can *see* the result of a change instead of guessing. They reuse the static catalog — the route map resolves a component to its URL automatically, so you name the component you changed and the browser knows where to go.
+The tools above understand your code statically. These drive a real (headless) browser against your **running app**, so an agent can *see* the result of a change instead of guessing. They reuse the static catalog — the route map resolves a component to its URL automatically, so you name the component you changed and the browser knows where to go.
 
 Powered by Playwright/Chromium. They require your dev server to be running and degrade gracefully — the static tools work even if the browser binaries aren't installed.
 
+- **Preflight.** Each runtime call first GETs `devServerUrl`; an unreachable server or a 5xx fails fast without launching Chromium, and every runtime error ends with what the dev server answered (`[dev server GET http://… → 200 "My App"]`).
+- **Navigation settles on a quiet window**, not `networkidle`: `load`, then a bounded window (≤10 s) with no short-lived request in flight. SSE / websocket streams, long-polls and `browser.idleIgnore` URLs never hold it open, so an app with a realtime stream doesn't burn a 30 s timeout per call. `waitUntil` (`quiet` | `load` | `domcontentloaded` | `networkidle`) overrides it; a stalled wait lists the requests still in flight.
+- **A fresh page per call**, in the same browser context: cookies, localStorage and IndexedDB carry over, `sessionStorage` (where many SPAs keep their token) is carried from one page to the next, and a previous call's open modal can't swallow this call's clicks.
+- **Per call:** `viewport {width,height}` (that call only), `loginAs` (a `browser.profiles` role, own context), and on `check_page` / `render_component` a read-only `measure: [selectors]`.
+
 ### `render_component`
 Render a catalog component in the live app and return a **screenshot plus runtime diagnostics** (console errors, uncaught exceptions, failed network requests). Resolves `component` → URL via the route map; or pass a raw `route`. Pass `params` for dynamic segments (e.g. `{"id": "123"}`). The screenshot comes back as an image the agent can look at. For a component that lives inside a one-route shell, pass `section` (see `get_section_map`) — or just name the section's child `component` — and it auto-reveals that section (query-append or activator click) before the shot, reporting how under `viewSection`.
+
+A component **no route renders** — a modal, a tab, a composable (through the components that consume it) — is reached through its nearest routed ancestor. `mountPath` lists each hop with the guard that mounts it; URL-query and section-click reveals are applied. When a hop sits behind app state (a modal's `v-if="showNew"`, or `:is-open="x"`), `targetMounted` is `false` and `captureFlowSteps` is a ready-to-run `capture_flow` plan whose click uses the template's own activator when it can find one (`<TODO>` otherwise). `verify_data_flow` returns verdict `gated` with the same plan rather than reporting the ancestor's traffic as drift.
 
 ### `check_page`
 The "did my change break anything" workhorse. Navigate to any `url` (absolute, or a path relative to the dev server) and get back a screenshot + console errors + uncaught exceptions + failed network calls. Call it after an edit to confirm the page still renders clean.
@@ -248,13 +270,13 @@ Pass `actions` (same shape as `capture_flow` actions) to drive the page after lo
 The reverse bridge. Opens a live page and reports which **catalog components are actually mounted** on it, mapped back to source files — "what do I edit to change the thing I'm looking at?" without grepping. Works by walking React/Vue dev internals, so it needs the dev build (not prod). Takes a catalog `component`, a `route`, or a raw `url`; returns `{ framework, mounted: [{name, count, relativePath, architectureLayer}], unmatched }`, text-only.
 
 ### `capture_flow`
-Drive a multi-step user flow against a **single persistent page** and screenshot each step. A step can navigate (`component`/`route`/`url`) and/or run **interactions** — so an agent can log in, fill a form, submit, and verify the next screen as one flow. Page state (cookies, form values, SPA route) carries across steps. Each step reports the **API calls it triggered** (`{method, path, status, bytes, rowCount, rowsFrom, totalCount}`), so "did clicking Save actually POST?" *and* "how many rows did that list return?" are answered in the same call. Aggregates diagnostics into a single pass/fail; on a failed action it screenshots the broken state and stops.
+Drive a multi-step user flow against **one page** (fresh for each call) and screenshot each step. A step can navigate (`component`/`route`/`url`), reveal a `section` of the page the flow is on, run **interactions**, or do none of these (settle and screenshot) — so an agent can log in, fill a form, submit, and verify the next screen as one flow. Page state (cookies, form values, SPA route) carries across steps. Each step reports the **API calls it triggered** (`{method, path, status, bytes, rowCount, rowsFrom, totalCount}`), so "did clicking Save actually POST?" *and* "how many rows did that list return?" are answered in the same call. Aggregates diagnostics into a single pass/fail; on a failed action it screenshots the broken state and stops.
 
 > **Response-body summary:** for JSON API responses, each call also carries a payload summary alongside `{method, path, status}` — `bytes` (response size), `rowCount` (rows in the primary collection), `rowsFrom` (which JSON key was counted: `$` for a top-level array, or a key path like `data` / `data.items`), and `totalCount` (a server-reported pagination total, when the body has one). Count-level assertions — "the projects call returned 1578 scoped rows" — no longer need a drop to `curl`. The row heuristic is framework- and app-agnostic: it counts a top-level array, a well-known envelope key (`data`/`results`/`items`/`records`/`content`/`edges`/…), or an object's sole array property, and always reports `rowsFrom` so a wrong guess is visible rather than silent. Bodies are read only for xhr/fetch or `/api/` responses, and only their shape — never their contents — is reported.
 
 Tip: `get_component_detail` exposes each component's `testIds` and `formFields` (with ready-made selectors) — build your steps from those instead of reading source.
 
-Each step's `actions` run in order. Supported action `type`s: `click`, `fill`, `select`, `check`, `uncheck`, `hover`, `press`, `waitFor`. Selectors accept CSS or Playwright engines (`#email`, `text=Submit`, `role=button[name="Save"]`). `fill`/`select` use `text`; `press` uses `key`.
+Each step's `actions` run in order. Supported action `type`s: `click`, `fill`, `select`, `check`, `uncheck`, `hover`, `press`, `waitFor`, `scroll` (into view, or by `x`/`y`), `wait` (`ms`), and the read-only `measure` (bounding box, scroll/client sizes, overflow and computed `properties` → the step's `measurements`). Selectors accept CSS or Playwright engines (`#email`, `text=Submit`, `role=button[name="Save"]`). `fill`/`select` use `text`; `press` uses `key`. A step's `viewport` resizes the page mid-flow.
 
 **Visible matches are preferred automatically.** Responsive layouts often render the same control twice (a desktop and a hidden mobile variant); actions and `waitFor` target the first *visible* match of the selector, so hidden duplicates never pin a click or wait until timeout, and no `:visible` suffix is needed. If every match stays hidden, the timeout error says so (`N match(es) but none visible`) instead of surfacing a generic retry log. This applies to all action runners: `capture_flow` steps, `verify_data_flow` actions, and the `browser.login` pre-step.
 
@@ -298,6 +320,9 @@ Add a `browser` block to `.atlas-ui.json` (all fields optional — these are the
 | `viewport` | Screenshot dimensions. |
 | `outputDir` | Where screenshots/videos are written (relative to your project, git-ignored). |
 | `routeParams` | Default values for dynamic route segments; per-call `params` override them. |
+| `idleIgnore` | URL patterns (substring, or glob with `*`) that never hold a navigation's quiet window open. |
+| `quietMs` / `quietMaxMs` / `longPollMs` / `navigationTimeoutMs` | Quiet-window tunables (defaults 500 / 10000 / 8000 / 30000). |
+| `profiles` | Named extra logins (`{ "coach": { …login block… } }`) selected per call with `loginAs`. |
 
 First-time setup downloads the browser binary:
 
@@ -307,7 +332,7 @@ npx playwright install chromium
 
 ### Login pre-step (authenticated routes)
 
-If your app is behind a login, add a `login` block. The session authenticates **once** on first browser use, and because every tool shares a single page, that session persists across all calls — so protected routes render logged-in. Put **credentials in env vars** and reference them with `${VAR}`; never inline secrets (the config is committed).
+If your app is behind a login, add a `login` block. The session authenticates **once** on first browser use and the login carries over to every later call's fresh page (context storage, plus a `sessionStorage` snapshot) — so protected routes render logged-in. For other roles add `browser.profiles` entries of the same shape and pass `loginAs`. Put **credentials in env vars** and reference them with `${VAR}`; never inline secrets (the config is committed).
 
 ```jsonc
 {
@@ -335,7 +360,7 @@ If your app is behind a login, add a `login` block. The session authenticates **
 
 The env vars must be visible to the MCP server process (set them in the `env` block of your `mcp.json` server entry). On login failure the session tears down and the next call retries, rather than silently running unauthenticated. Filled values are reported by length, so credentials never appear in tool output.
 
-> **SPA note:** all browser tools share one page so in-app/session-storage auth survives navigation. If your app stores its token in `sessionStorage` (common), a per-page approach would lose it — sharing the page is what makes the login pre-step stick.
+> **SPA note:** each call gets a fresh page, but `sessionStorage` is snapshotted when a page is retired (and right after login) and seeded into the next page on the app's origin, so a token kept there survives. A failed login reports the URL and `<title>` it stopped on and saves a screenshot.
 
 ## License
 
