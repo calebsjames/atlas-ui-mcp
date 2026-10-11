@@ -4,7 +4,7 @@ import type { CacheManager } from "../cache/cacheManager.js";
 import type { FlowAction } from "./types.js";
 import { getRouteMap, type RouteMapEntry } from "../tools/getRouteMap.js";
 import { findByLayers, ROUTE_OWNER_LAYERS } from "../tools/shared.js";
-import { planSectionReveal } from "./sectionReveal.js";
+import { listSectionIds, planSectionReveal } from "./sectionReveal.js";
 import { toAbsoluteUrl } from "../util.js";
 
 export interface ResolvedRoute {
@@ -35,6 +35,8 @@ export interface ResolvedRoute {
     selector?: string;
     via: "query" | "click" | "unknown";
     condition?: string;
+    /** A compound section's `{var: value}` conditions. */
+    conditions?: Record<string, string>;
     /** Whether we auto-revealed (query appended or revealActions attached). */
     applied: boolean;
     note?: string;
@@ -127,11 +129,23 @@ export async function resolveRoute(
     const page = findByLayers(cache.getByName(match.component), ROUTE_OWNER_LAYERS);
     if (page) {
       const plan = await planSectionReveal(page.path, page.name, target);
+      if (!plan && opts.section != null) {
+        // An unmatched id used to fall through silently and screenshot the
+        // container's DEFAULT view. Say so, with the ids that do exist.
+        const valid = await listSectionIds(page.path, page.name);
+        throw new Error(
+          valid.length
+            ? `No section "${opts.section}" on ${page.name} (${match.path}). Valid sections: ` +
+                valid.map((v) => JSON.stringify(v)).join(", ") +
+                ". Ids match case- and whitespace-insensitively; see get_section_map."
+            : `${page.name} (${match.path}) has no statically detected sections, so section ` +
+                `"${opts.section}" can't be revealed. Drop "section" or drive the UI with capture_flow.`
+        );
+      }
       if (plan) {
-        if (plan.queryParam) {
-          finalUrl +=
-            (finalUrl.includes("?") ? "&" : "?") +
-            `${plan.queryParam.key}=${encodeURIComponent(plan.queryParam.value)}`;
+        for (const q of [plan.queryParam, ...(plan.alsoQuery ?? [])]) {
+          if (!q) continue;
+          finalUrl += (finalUrl.includes("?") ? "&" : "?") + `${q.key}=${encodeURIComponent(q.value)}`;
         }
         if (plan.actions) revealActions = plan.actions;
         viewSection = {
@@ -140,6 +154,7 @@ export async function resolveRoute(
           ...(plan.selector != null ? { selector: plan.selector } : {}),
           via: plan.via,
           ...(plan.condition ? { condition: plan.condition } : {}),
+          ...(plan.conditions ? { conditions: plan.conditions } : {}),
           applied: plan.applied,
           ...(plan.note ? { note: plan.note } : {}),
         };

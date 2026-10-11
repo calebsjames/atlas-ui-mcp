@@ -11,8 +11,8 @@ import {
   expressionSource,
 } from "./sfcParser.js";
 import { VUE_BUILTINS } from "./vueTemplate.js";
+import { parseGateDisjuncts, type GateDisjunct } from "./gateExpression.js";
 import {
-  parseEqualityGate,
   findVueRouteQueryKey,
   activatorSelector,
   type Section,
@@ -33,9 +33,10 @@ export function extractVueViewContainer(source: string, componentName: string): 
   const { templateAst } = parseSfc(source);
   if (!templateAst) return null;
 
-  // var -> (section literal -> child component), in first-seen order.
-  const gatesByVar = new Map<string, Map<string, string | undefined>>();
-  const varOrder: string[] = [];
+  // Every gated element, one entry per `||` disjunct, in source order.
+  const gates: Array<{ disjunct: GateDisjunct; child?: string }> = [];
+  // var -> distinct literal values, in first-seen order.
+  const valuesByVar = new Map<string, Set<string>>();
   // "var\0value" -> the element whose @click assigns that literal to the var.
   const activators = new Map<string, ElementNode>();
 
@@ -44,14 +45,14 @@ export function extractVueViewContainer(source: string, componentName: string): 
       if (p.type !== NodeTypes.DIRECTIVE) continue;
       if (p.name === "if" || p.name === "show" || p.name === "else-if") {
         if (!p.exp) continue;
-        const gate = parseEqualityGate(expressionSource(p.exp));
-        if (!gate) continue;
-        if (!gatesByVar.has(gate.var)) {
-          gatesByVar.set(gate.var, new Map());
-          varOrder.push(gate.var);
+        const child = namedChild(el) ?? firstComponentIn(el);
+        for (const disjunct of parseGateDisjuncts(expressionSource(p.exp))) {
+          gates.push({ disjunct, child });
+          for (const t of disjunct.terms) {
+            if (!valuesByVar.has(t.var)) valuesByVar.set(t.var, new Set());
+            valuesByVar.get(t.var)!.add(t.value);
+          }
         }
-        const byValue = gatesByVar.get(gate.var)!;
-        if (!byValue.has(gate.value)) byValue.set(gate.value, namedChild(el) ?? firstComponentIn(el));
       }
     }
     // Click handlers that assign a literal to a variable are section switches.
@@ -64,34 +65,95 @@ export function extractVueViewContainer(source: string, componentName: string): 
     }
   });
 
-  // The container variable is the one multiplexing the most literal-keyed views.
+  // The container variable is the one multiplexing the most literal-keyed
+  // views. On a tie, prefer the one whose literal is unique per gated view
+  // (the tab in `section && tab`), so section ids don't collide.
+  const repeats = (v: string) =>
+    gates.filter((g) => g.disjunct.terms.some((t) => t.var === v)).length - valuesByVar.get(v)!.size;
   let chosen: string | undefined;
-  for (const v of varOrder) {
-    const count = gatesByVar.get(v)!.size;
-    if (count >= 2 && (!chosen || count > gatesByVar.get(chosen)!.size)) chosen = v;
+  for (const [v, values] of valuesByVar) {
+    if (values.size < 2) continue;
+    if (!chosen) {
+      chosen = v;
+      continue;
+    }
+    const best = valuesByVar.get(chosen)!.size;
+    if (values.size > best || (values.size === best && repeats(v) < repeats(chosen))) chosen = v;
   }
   if (!chosen) return null;
 
-  const queryKey = findVueRouteQueryKey(source, chosen);
-  const sections: Section[] = [];
-  for (const [value, child] of gatesByVar.get(chosen)!) {
-    const section: Section = { id: value, reachedBy: "unknown" };
-    if (child) section.child = child;
+  // Variables that gate TOGETHER with the selector (`section && tab`) are part
+  // of the same switch; a gate on an unrelated variable (a modal flag) is not.
+  const related = new Set<string>([chosen]);
+  for (const { disjunct } of gates) {
+    const vars = disjunct.terms.map((t) => t.var);
+    if (vars.includes(chosen)) vars.forEach((v) => related.add(v));
+  }
 
-    const activatorEl = activators.get(`${chosen}\0${value}`);
+  const queryKeys = new Map<string, string | undefined>();
+  const queryKeyOf = (v: string) => {
+    if (!queryKeys.has(v)) queryKeys.set(v, findVueRouteQueryKey(source, v));
+    return queryKeys.get(v);
+  };
+
+  const sections: Section[] = [];
+  const idSignature = new Map<string, string>();
+  const byId = new Map<string, Section>();
+  for (const { disjunct, child } of gates) {
+    const terms = disjunct.terms;
+    if (!terms.every((t) => related.has(t.var))) continue;
+    const primary = terms.find((t) => t.var === chosen) ?? terms[0];
+    const conditions = Object.fromEntries(terms.map((t) => [t.var, t.value]));
+    const signature = JSON.stringify(conditions);
+
+    // The id is the selector's literal; if two different gates would share it,
+    // qualify the later one with its other values so every id stays unique.
+    let id = primary.value;
+    const prior = idSignature.get(id);
+    if (prior === signature) {
+      // Another element rendered by the same section (a header strip plus the
+      // tab body). The one gated by the equality ALONE is the section's main
+      // view; extra-conditioned ones (`&& fitterAccountId`) are secondary.
+      const existing = byId.get(id)!;
+      if (child && child !== existing.child) {
+        if (existing.alsoRequires && !disjunct.extra) {
+          if (existing.child) existing.alsoRenders = [...(existing.alsoRenders ?? []), existing.child];
+          existing.child = child;
+          delete existing.alsoRequires;
+        } else if (!existing.alsoRenders?.includes(child)) {
+          existing.alsoRenders = [...(existing.alsoRenders ?? []), child];
+        }
+      }
+      continue;
+    }
+    if (prior !== undefined) id = terms.map((t) => t.value).join(" / ");
+    if (idSignature.has(id)) continue;
+    idSignature.set(id, signature);
+
+    const section: Section = { id, reachedBy: "unknown" };
+    if (child) section.child = child;
+    if (terms.length > 1) section.conditions = conditions;
+    if (disjunct.extra) section.alsoRequires = disjunct.extra;
+
+    const activatorEl = activators.get(`${primary.var}\0${primary.value}`);
     if (activatorEl) {
       const label = activatorText(activatorEl);
       const selector = activatorSelector(staticAttr(activatorEl, "data-testid"), label);
       if (selector) section.activator = { selector, ...(label ? { label } : {}) };
     }
 
-    if (queryKey) {
+    const keys = terms.map((t) => ({ t, key: queryKeyOf(t.var) }));
+    if (keys.every((k) => k.key)) {
+      const primaryKey = keys.find((k) => k.t === primary)!;
       section.reachedBy = "query";
-      section.queryParam = { key: queryKey, value };
-    } else if (activatorEl) {
+      section.queryParam = { key: primaryKey.key!, value: primary.value };
+      const others = keys.filter((k) => k.t !== primary).map((k) => ({ key: k.key!, value: k.t.value }));
+      if (others.length) section.alsoQuery = others;
+    } else if (activatorEl && terms.length === 1) {
       section.reachedBy = "click";
     }
     sections.push(section);
+    byId.set(id, section);
   }
 
   return { container: componentName, selector: chosen, framework: "vue", sections };

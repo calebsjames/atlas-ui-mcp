@@ -1,4 +1,5 @@
-import { escapeRegex } from "../util.js";
+import { parseSingleEquality } from "./gateExpression.js";
+import { findRouteQueryKeyFlowingInto } from "./routeQueryFlow.js";
 
 /**
  * The "section map" model — a framework-blind description of a component that
@@ -35,6 +36,17 @@ export interface Section {
   reachedBy: SectionReachedBy;
   /** When the selector syncs to a URL query key: the key + this section's value. */
   queryParam?: { key: string; value: string };
+  /**
+   * Compound gate (`activeSection === 'Projects' && activeTab === 'X'`): every
+   * variable the section needs, with its value. Absent for a one-variable gate.
+   */
+  conditions?: Record<string, string>;
+  /** Query params for the compound gate's OTHER variables, when all are URL-synced. */
+  alsoQuery?: Array<{ key: string; value: string }>;
+  /** Non-equality conjuncts the gate also requires (`isAdmin`), as source. */
+  alsoRequires?: string[];
+  /** Other components the same section renders (a header strip beside the tab body). */
+  alsoRenders?: string[];
   /** The control that switches to this section, when statically identifiable. */
   activator?: SectionActivator;
 }
@@ -53,46 +65,30 @@ export interface ViewContainer {
 
 /**
  * Parse a simple equality gate into the variable and the string literal it's
- * compared against — `X === 'lit'` or `'lit' == X`, either side, 2 or 3 `=`,
- * with an optional Vue `.value` unwrap. Returns null for anything that isn't a
- * plain literal equality (comparisons to constants/enums, `!==`, `&&` chains).
- * Shared by the Vue view-gate detector and both view-container extractors so
- * "what counts as a section gate" is defined once.
+ * compared against — `X === 'lit'` or `'lit' == X`, either side, with an
+ * optional Vue `.value` unwrap. Returns null for anything that isn't ONE plain
+ * literal equality (disjunctions, `&&` compounds, comparisons to constants).
+ * Parsed with the TypeScript AST (see gateExpression.ts); callers that need
+ * the full `||` / `&&` structure use parseGateDisjuncts directly.
  */
 export function parseEqualityGate(expr: string): { var: string; value: string } | null {
-  const m =
-    /^\s*(?:([A-Za-z_$][\w$]*)(?:\.value)?\s*===?\s*(['"])(.*?)\2|(['"])(.*?)\4\s*===?\s*([A-Za-z_$][\w$]*)(?:\.value)?)\s*$/.exec(
-      expr
-    );
-  if (!m) return null;
-  const varName = m[1] ?? m[6];
-  const value = m[3] ?? m[5];
-  return { var: varName, value };
+  return parseSingleEquality(expr);
 }
 
 /**
- * Trace a Vue gate variable to the `route.query` key that drives it, so a
- * section can be revealed by URL instead of a click. Three wiring shapes cover
- * the common view containers:
- *  1. reverse sync:  router.replace({ query: { view: currentView.value } })
- *  2. watch/assign:  a `route.query.<key>` read followed shortly by an
- *                    assignment INTO the var
- *  3. direct init:   currentView = <expr involving> route.query.view
+ * Trace a Vue gate variable to the `route.query` key whose value flows into
+ * it, so a section can be revealed by URL instead of a click. Only a real
+ * data flow counts (see routeQueryFlow.ts) — a query read that merely sits
+ * near an assignment, or reaches it through a lookup table, does not.
  * Returns undefined when no query wiring is found (the section is click-only).
  */
 export function findVueRouteQueryKey(source: string, varName: string): string | undefined {
-  const v = escapeRegex(varName);
+  return findRouteQueryKeyFlowingInto(source, varName);
+}
 
-  let m = new RegExp(`query:\\s*\\{\\s*(\\w+):\\s*${v}\\b`).exec(source);
-  if (m) return m[1];
-
-  m = new RegExp(`route\\.query\\.(\\w+)[\\s\\S]{0,300}?\\b${v}(?:\\.value)?\\s*=[^=]`).exec(source);
-  if (m) return m[1];
-
-  m = new RegExp(`\\b${v}(?:\\.value)?\\s*=[^=][^;\\n]*route\\.query\\.(\\w+)`).exec(source);
-  if (m) return m[1];
-
-  return undefined;
+/** Normalize a section id for matching: case-, whitespace-, `-` and `_`-insensitive. */
+export function normalizeSectionId(id: string): string {
+  return id.toLowerCase().replace(/[\s_-]+/g, "");
 }
 
 /** Best drivable selector for an activator element, given what we could read off it. */

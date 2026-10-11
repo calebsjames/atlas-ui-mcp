@@ -1,6 +1,6 @@
 import fs from "fs/promises";
 import type { FlowAction } from "./types.js";
-import type { Section, ViewContainer } from "../analyzer/viewContainer.js";
+import { normalizeSectionId, type Section, type ViewContainer } from "../analyzer/viewContainer.js";
 import { extractViewContainer } from "../analyzer/extractViewContainer.js";
 import { detectViewGate } from "./viewGate.js";
 
@@ -22,6 +22,10 @@ export interface SectionReveal {
   condition?: string;
   /** Append to the URL to reveal the section. */
   queryParam?: { key: string; value: string };
+  /** Further params a compound (`a && b`) section needs, all appended. */
+  alsoQuery?: Array<{ key: string; value: string }>;
+  /** A compound gate's full `{var: value}` conditions. */
+  conditions?: Record<string, string>;
   /** Run after navigation to reveal the section (a click on the activator). */
   actions?: FlowAction[];
   /** True when we produced a concrete reveal (query appended or actions attached). */
@@ -88,17 +92,45 @@ export async function planSectionReveal(
 }
 
 function findSection(c: ViewContainer, t: { child?: string; sectionId?: string }): Section | undefined {
+  // Ids match case-, whitespace-, `-`/`_`-insensitively: `clubfittings` and
+  // `club-fittings` both find "Club Fittings" (the URL still gets the exact literal).
+  const wanted = t.sectionId != null ? normalizeSectionId(t.sectionId) : undefined;
   return c.sections.find(
     (s) =>
-      (t.sectionId != null && s.id === t.sectionId) ||
-      (t.child != null && s.child != null && s.child.toLowerCase() === t.child.toLowerCase())
+      (wanted !== undefined && normalizeSectionId(s.id) === wanted) ||
+      (t.child != null &&
+        [s.child, ...(s.alsoRenders ?? [])].some((c) => c != null && c.toLowerCase() === t.child!.toLowerCase()))
   );
 }
 
+/**
+ * The section ids a page's view multiplexer exposes — for the "no such
+ * section" error. Empty when the page has no multiplexer or can't be read.
+ */
+export async function listSectionIds(pagePath: string, pageName: string): Promise<string[]> {
+  try {
+    const source = await fs.readFile(pagePath, "utf-8");
+    return extractViewContainer(source, pageName, pagePath)?.sections.map((s) => s.id) ?? [];
+  } catch {
+    return [];
+  }
+}
+
 function fromSection(c: ViewContainer, section: Section): SectionReveal {
-  const base = { container: c.container, selector: c.selector, section: section.id };
+  const base = {
+    container: c.container,
+    selector: c.selector,
+    section: section.id,
+    ...(section.conditions ? { conditions: section.conditions } : {}),
+  };
   if (section.queryParam) {
-    return { ...base, via: "query", queryParam: section.queryParam, applied: true };
+    return {
+      ...base,
+      via: "query",
+      queryParam: section.queryParam,
+      ...(section.alsoQuery ? { alsoQuery: section.alsoQuery } : {}),
+      applied: true,
+    };
   }
   if (section.activator) {
     return {

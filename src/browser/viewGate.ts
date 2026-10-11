@@ -1,5 +1,6 @@
 import { escapeRegex } from "../util.js";
-import { parseEqualityGate, findVueRouteQueryKey } from "../analyzer/viewContainer.js";
+import { findVueRouteQueryKey } from "../analyzer/viewContainer.js";
+import { parseGateDisjuncts } from "../analyzer/gateExpression.js";
 
 /**
  * A conditional render gate on a child component inside a routed page — the
@@ -37,7 +38,8 @@ export function detectViewGate(pageSource: string, childName: string): ViewGate 
 
   // Simple literal equality only (`X === 'lit'` / `'lit' == X`); a more complex
   // gate is still reported, condition-only, so callers know an interaction is needed.
-  const gate = parseEqualityGate(condition);
+  // The first single-variable disjunct (`v === 'a' || v === 'b'` reveals via 'a').
+  const gate = parseGateDisjuncts(condition).find((d) => d.terms.length === 1 && !d.extra)?.terms[0];
   if (!gate) return { condition };
 
   const queryKey = findVueRouteQueryKey(pageSource, gate.var);
