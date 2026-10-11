@@ -613,7 +613,11 @@ export class BrowserSession {
       }
     });
     page.on("requestfailed", (req) => {
+      const live = d.inflight.get(req);
       d.inflight.delete(req);
+      // A stream (SSE/websocket) aborted because the page navigated away is
+      // the app working as intended, not a failed request.
+      if (live?.longLived && /ERR_ABORTED|aborted/i.test(req.failure()?.errorText || "")) return;
       d.failedRequests.push({
         url: req.url(),
         method: req.method(),

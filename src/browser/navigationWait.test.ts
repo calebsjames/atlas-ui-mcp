@@ -125,3 +125,12 @@ test("browser.idleIgnore excludes a matching long-poll from the quiet window", a
     assert.ok(result.durationMs < 6_000, `took ${result.durationMs}ms — the ignored poll held the wait`);
   });
 });
+
+test("an SSE stream aborted by navigating away is not a failed request", async () => {
+  await withSession({}, async (session, base) => {
+    await session.capture(`${base}/`, { label: "first" });
+    const second = await session.capture(`${base}/?again=1`, { label: "second" });
+    const streamFailures = second.failedRequests.filter((r) => r.url.includes("/realtime/stream"));
+    assert.deepEqual(streamFailures, [], "the aborted stream from the previous page was reported as a failure");
+  });
+});
