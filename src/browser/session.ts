@@ -60,10 +60,16 @@ export class BrowserSession {
   // a broken credential on every call) and surface it to authed calls only —
   // public calls never consult it, so one bad login can't blank all runtime work.
   private loginError: string | null = null;
-  // All tools share ONE page so SPA state — including session-storage-based auth
-  // — survives across calls. Diagnostics accumulate here and are sliced per-call.
+  // Each top-level call gets a FRESH page in the one shared context, so a
+  // previous call's open modal/overlay can't swallow this call's clicks.
+  // Cookies, localStorage and IndexedDB live in the context and carry over;
+  // sessionStorage is per-page, so it is snapshotted when a page is retired
+  // and seeded into the next (apps keep auth tokens there).
   private primaryPage: Page | null = null;
   private primaryDiag: DiagBuffers | null = null;
+  private sessionSnapshot: { origin: string; entries: [string, string][] } | null = null;
+  /** The URL the last call's page ended on — a flow whose first step has no target reopens it. */
+  private lastUrl: string | null = null;
   private outputDirAbs: string;
   private diagByPage = new WeakMap<Page, DiagBuffers>();
 
@@ -139,17 +145,52 @@ export class BrowserSession {
     opts: { requireAuth?: boolean } = {}
   ): Promise<{ page: Page; diag: DiagBuffers }> {
     const context = await this.ensureContext();
-    if (!this.primaryPage || !this.primaryDiag) {
-      const page = await context.newPage();
-      this.primaryDiag = this.attach(page);
-      this.primaryPage = page;
+    await this.retirePage();
+
+    const page = await context.newPage();
+    this.primaryDiag = this.attach(page);
+    this.primaryPage = page;
+    if (this.sessionSnapshot) {
+      // Seed only an EMPTY sessionStorage on the app's origin, so later
+      // navigations in this page keep whatever the app wrote meanwhile.
+      await page.addInitScript((snap: { origin: string; entries: [string, string][] }) => {
+        try {
+          if (location.origin !== snap.origin || sessionStorage.length > 0) return;
+          for (const [k, v] of snap.entries) sessionStorage.setItem(k, v);
+        } catch {
+          /* storage blocked — nothing to seed */
+        }
+      }, this.sessionSnapshot);
     }
 
     if (opts.requireAuth) {
       await this.ensureLoggedIn();
     }
 
-    return { page: this.primaryPage, diag: this.primaryDiag };
+    return { page, diag: this.primaryDiag };
+  }
+
+  /** Snapshot the current page's sessionStorage + URL, then close it. */
+  private async retirePage(): Promise<void> {
+    const page = this.primaryPage;
+    this.primaryPage = null;
+    this.primaryDiag = null;
+    if (!page || page.isClosed()) return;
+    await this.snapshotSession(page);
+    await page.close().catch(() => {});
+  }
+
+  private async snapshotSession(page: Page): Promise<void> {
+    try {
+      const url = page.url();
+      if (/^https?:/.test(url)) this.lastUrl = url;
+      const origin = new URL(url).origin;
+      if (origin !== new URL(this.baseUrl).origin) return;
+      const entries = await page.evaluate(() => Object.entries(sessionStorage) as [string, string][]);
+      this.sessionSnapshot = { origin, entries };
+    } catch {
+      /* about:blank, closed, or cross-origin — keep the previous snapshot */
+    }
   }
 
   /**
@@ -170,6 +211,8 @@ export class BrowserSession {
     try {
       await this.performLogin(this.primaryPage!);
       this.loggedIn = true;
+      // The token the login wrote to sessionStorage must reach later pages.
+      await this.snapshotSession(this.primaryPage!);
     } catch (err) {
       this.loginError = errMessage(err);
       throw err;
@@ -205,6 +248,8 @@ export class BrowserSession {
     this.context = null;
     this.loggedIn = false;
     this.loginError = null;
+    this.sessionSnapshot = null;
+    this.lastUrl = null;
 
     if (!this.config.login) return { loggedIn: false };
 
@@ -416,6 +461,19 @@ export class BrowserSession {
     const { page, diag } = await this.ensurePage({ requireAuth: opts.requireAuth !== false });
     const results: FlowStepResult[] = [];
 
+    // The page is fresh. A flow that starts by acting "on the current page"
+    // reopens the previous call's URL — from a clean load, so its in-page
+    // state (an open modal, a typed-in form) is NOT carried over.
+    if (steps.length && !steps[0].url) {
+      if (!this.lastUrl) {
+        throw new Error(
+          "The first step has no navigation target and there is no previous page to act on — " +
+            "give it a component, route or url."
+        );
+      }
+      steps = [{ ...steps[0], url: this.lastUrl, reopened: true }, ...steps.slice(1)];
+    }
+
     for (let i = 0; i < steps.length; i++) {
       const step = steps[i];
       const result = await this.runFlowStep(page, diag, step, i, opts.settleMs, opts.waitUntil);
@@ -444,7 +502,11 @@ export class BrowserSession {
     try {
       if (step.url) {
         pendingRequests = await this.navigate(page, step.url, waitUntil);
-        performed.push(`navigated to ${step.url}`);
+        performed.push(
+          step.reopened
+            ? `reopened ${step.url} (fresh page — the previous call's in-page state is not carried over)`
+            : `navigated to ${step.url}`
+        );
       }
       for (const action of step.actions || []) {
         await runAction(page, action);
@@ -637,6 +699,8 @@ export class BrowserSession {
   }
 
   async close(): Promise<void> {
+    this.sessionSnapshot = null;
+    this.lastUrl = null;
     await this.primaryPage?.close().catch(() => {});
     await this.context?.close().catch(() => {});
     await this.browser?.close().catch(() => {});

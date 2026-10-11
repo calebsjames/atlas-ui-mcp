@@ -110,6 +110,8 @@ export interface ResolvedFlowStep {
   continueOnError?: boolean;
   /** How this step's navigation decides it is done (default: the flow's, else "quiet"). */
   waitUntil?: WaitUntil;
+  /** Set internally when `url` reopens the previous call's page for a flow that started without one. */
+  reopened?: boolean;
 }
 
 export interface FlowStepResult {
