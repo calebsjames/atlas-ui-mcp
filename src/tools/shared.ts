@@ -296,6 +296,22 @@ function editDistance(a: string, b: string, max: number): number {
 }
 
 /**
+ * One entry per FILE. The catalog is per-file, so two entries with the same
+ * relativePath are the same node reached twice (e.g. via name + alias) — never
+ * a real collision to ask the caller about.
+ */
+export function dedupeByPath(matches: Component[]): Component[] {
+  const seen = new Set<string>();
+  const out: Component[] = [];
+  for (const m of matches) {
+    if (seen.has(m.relativePath)) continue;
+    seen.add(m.relativePath);
+    out.push(m);
+  }
+  return out;
+}
+
+/**
  * Resolve a name to a single Component, disambiguating by `file` when the name
  * collides. `matches` is whatever the caller looked up (optionally pre-narrowed,
  * e.g. to hook-layer items). Returns the sole match, `null` when nothing
@@ -308,6 +324,7 @@ export function resolveByName(
   name: string,
   file?: string
 ): Component | AmbiguousMatch | null {
+  matches = dedupeByPath(matches);
   if (matches.length === 0) return null;
   if (matches.length === 1) return matches[0];
 

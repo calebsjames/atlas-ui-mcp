@@ -177,10 +177,17 @@ export class CacheManager {
   }
 
   private addToIndex(index: Map<string, Component[]>, key: string, component: Component): void {
-    if (!index.has(key)) {
-      index.set(key, []);
+    let bucket = index.get(key);
+    if (!bucket) {
+      bucket = [];
+      index.set(key, bucket);
     }
-    index.get(key)!.push(component);
+    // One node, one entry per key. A node reachable under the same key twice
+    // (a case-only fileAlias: `InventoryService` in inventoryService.ts) used
+    // to be pushed twice, turning every lookup into an "ambiguous" pair of
+    // identical candidates that no `file` filter could separate.
+    if (bucket.includes(component)) return;
+    bucket.push(component);
   }
 
   private clearIndexes(): void {
@@ -197,8 +204,12 @@ export class CacheManager {
 
     for (const component of catalog.components) {
       this.addToIndex(this.nameIndex, component.name.toLowerCase(), component);
-      // Also index by fileAlias (when defineComponent name differs from filename)
-      if (component.fileAlias) {
+      // Also index by fileAlias (when defineComponent name differs from filename).
+      // An alias equal to the name ignoring case is the same key — skip it.
+      if (
+        component.fileAlias &&
+        component.fileAlias.toLowerCase() !== component.name.toLowerCase()
+      ) {
         this.addToIndex(this.nameIndex, component.fileAlias.toLowerCase(), component);
       }
 
