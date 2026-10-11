@@ -8,7 +8,9 @@ import {
   nameNotFound,
   resolveByName,
   RENDERABLE_LAYERS,
+  symbolMatch,
   type NameNotFound,
+  type SymbolMatch,
 } from "./shared.js";
 
 export interface DataFlowStep {
@@ -39,8 +41,10 @@ export interface DataFlowChain {
   via?: string[];
 }
 
-export interface DataFlowResult {
+export interface DataFlowResult extends Partial<SymbolMatch> {
   target: string;
+  /** Endpoints the matched secondary export itself owns, when attributable. */
+  symbolEndpoints?: string[];
   chains: DataFlowChain[];
   /** Union of every endpoint reachable from rendering the target (incl. children). */
   allEndpoints: string[];
@@ -141,8 +145,20 @@ export async function getDataFlow(
 
   const allEndpoints = [...new Set(uniqueChains.flatMap((c) => c.endpoints))];
 
+  const sym = symbolMatch(
+    target,
+    args.name,
+    "chains and allEndpoints are traced from the whole module (file-level), so they may " +
+      "include sibling exports' calls" +
+      (target.endpointsByMethod ? "; symbolEndpoints lists the endpoints this export owns." : ".")
+  );
+  const symbolEndpoints =
+    !sym.isPrimaryExport && sym.matchedExport ? target.endpointsByMethod?.[sym.matchedExport] : undefined;
+
   return {
-    target: target.name,
+    target: sym.matchedExport ?? target.name,
+    ...(sym.isPrimaryExport ? {} : sym),
+    ...(symbolEndpoints?.length ? { symbolEndpoints } : {}),
     chains: uniqueChains,
     allEndpoints,
     depth: maxDepth,

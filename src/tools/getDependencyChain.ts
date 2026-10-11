@@ -1,12 +1,14 @@
 import type { ComponentScanner } from "../scanner/componentScanner.js";
-import type { CacheManager } from "../cache/cacheManager.js";
+import { CacheManager } from "../cache/cacheManager.js";
 import type { AmbiguousMatch, ArchitectureLayer, Component } from "../types.js";
 import {
   ensureCatalog,
   isAmbiguousMatch,
   nameNotFound,
   resolveByName,
+  symbolMatch,
   type NameNotFound,
+  type SymbolMatch,
 } from "./shared.js";
 
 export interface DependencyNode {
@@ -17,7 +19,7 @@ export interface DependencyNode {
   usedBy?: DependencyNode[];
 }
 
-export interface DependencyChain {
+export interface DependencyChain extends Partial<SymbolMatch> {
   target: DependencyNode;
   dependsOn: DependencyNode[];
   usedBy: DependencyNode[];
@@ -49,10 +51,29 @@ export async function getDependencyChain(
     architectureLayer: target.architectureLayer,
   };
 
-  const dependsOn = collectDownstreamRecursive(target, cache, depth, new Set([target.relativePath]));
-  const usedBy = collectUpstreamRecursive(target, cache, depth, new Set([target.relativePath]));
+  const sym = symbolMatch(
+    target,
+    args.name,
+    "dependsOn is the whole module's dependencies (file-level); usedBy is scoped to files " +
+      "that import this symbol (plus namespace imports of the module)."
+  );
+  if (sym.matchedExport) targetNode.name = sym.matchedExport;
 
-  return { target: targetNode, dependsOn, usedBy };
+  const dependsOn = collectDownstreamRecursive(target, cache, depth, new Set([target.relativePath]));
+  const usedBy = collectUpstreamRecursive(
+    target,
+    cache,
+    depth,
+    new Set([target.relativePath]),
+    sym.isPrimaryExport ? undefined : sym.matchedExport
+  );
+
+  return {
+    target: targetNode,
+    ...(sym.isPrimaryExport ? { isPrimaryExport: true } : sym),
+    dependsOn,
+    usedBy,
+  };
 }
 
 /**
@@ -103,6 +124,17 @@ function collectDownstreamRecursive(
   return result;
 }
 
+/** Does `c` import `symbol` from the module at `fileKey` (or the whole module as a namespace)? */
+function importsSymbol(c: Component, fileKey: string, symbol: string): boolean {
+  const s = symbol.toLowerCase();
+  return (c.imports || []).some((imp) => {
+    if (!imp.resolvedPath) return false;
+    const k = CacheManager.normalizeModulePath(imp.resolvedPath);
+    if (k !== fileKey && `${k}/index` !== fileKey) return false;
+    return imp.type === "namespace" || imp.names.some((n) => n.toLowerCase() === s);
+  });
+}
+
 /**
  * What uses this item: everything that imports its FILE (catches named-export
  * imports the name index would miss, and never matches a same-named import from
@@ -113,12 +145,18 @@ function collectUpstreamRecursive(
   target: Component,
   cache: CacheManager,
   depth: number,
-  seen: Set<string>
+  seen: Set<string>,
+  /** Scope the FIRST level to importers of this one exported symbol. */
+  symbol?: string
 ): DependencyNode[] {
   const uppers = new Map<string, Component>();
-  for (const c of cache.getImportersOfFile(target.relativePath)) uppers.set(c.relativePath, c);
-  for (const c of cache.getRenderersOf(target.name)) uppers.set(c.relativePath, c);
-  if (target.fileAlias) {
+  const fileKey = CacheManager.normalizeModulePath(target.relativePath);
+  for (const c of cache.getImportersOfFile(target.relativePath)) {
+    if (symbol && !importsSymbol(c, fileKey, symbol)) continue;
+    uppers.set(c.relativePath, c);
+  }
+  for (const c of cache.getRenderersOf(symbol ?? target.name)) uppers.set(c.relativePath, c);
+  if (target.fileAlias && !symbol) {
     for (const c of cache.getRenderersOf(target.fileAlias)) uppers.set(c.relativePath, c);
   }
   uppers.delete(target.relativePath);

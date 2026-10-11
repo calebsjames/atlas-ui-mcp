@@ -7,12 +7,23 @@ import {
   isAmbiguousMatch,
   nameNotFound,
   resolveByName,
+  symbolMatch,
   type NameNotFound,
+  type SymbolMatch,
 } from "./shared.js";
+import { findExportDeclaration } from "../analyzer/exportDeclaration.js";
 
-export interface ComponentDetail extends Component {
+export interface ComponentDetail extends Component, SymbolMatch {
   props?: ComponentProps;
+  /** Declaration form of a secondary export (function, variable, class, …). */
+  declarationKind?: string;
 }
+
+const FILE_LEVEL =
+  "name, line, description and exportType are this symbol's own; every other field " +
+  "(hooks, imports, childComponents, stateVariables, apiEndpoints, adapterCalls, " +
+  "dtosUsed, emits, testIds, formFields, accessibility, …) is FILE-level and may " +
+  "describe a sibling export. Read the file to attribute them.";
 
 /**
  * Get detailed information about a specific component.
@@ -35,14 +46,30 @@ export async function getComponentDetail(
   if (isAmbiguousMatch(resolved)) return resolved;
 
   const component = resolved;
+  const sym = symbolMatch(component, name, FILE_LEVEL);
+
+  if (!sym.isPrimaryExport && sym.matchedExport) {
+    // Answer about the SYMBOL: its own line/JSDoc, not the primary export's.
+    // Props are the file component's interface — meaningless for this export.
+    const decl = await findExportDeclaration(component.path, sym.matchedExport);
+    const { line: _line, description: _description, exportType: _exportType, ...fileLevel } = component;
+    return {
+      ...fileLevel,
+      name: sym.matchedExport,
+      ...sym,
+      ...(decl ? { line: decl.line, declarationKind: decl.kind, exportType: "named" as const } : {}),
+      ...(decl?.description ? { description: decl.description } : {}),
+    };
+  }
 
   try {
     const props = await parser.parseFile(component.path);
     return {
       ...component,
+      ...sym,
       props: props || undefined,
     };
   } catch {
-    return component;
+    return { ...component, ...sym };
   }
 }

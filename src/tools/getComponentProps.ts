@@ -9,7 +9,9 @@ import {
   isAmbiguousMatch,
   nameNotFound,
   resolveByName,
+  symbolMatch,
   type NameNotFound,
+  type SymbolMatch,
 } from "./shared.js";
 
 /**
@@ -28,7 +30,11 @@ export async function getComponentProps(
   parser: PropParser,
   cache: CacheManager,
   scanner: ComponentScanner
-): Promise<ComponentProps | AmbiguousMatch | NameNotFound | { error: string }> {
+): Promise<
+  | ((ComponentProps | { error: string }) & Partial<SymbolMatch>)
+  | AmbiguousMatch
+  | NameNotFound
+> {
   if (args.componentPath) {
     const fullPath = path.isAbsolute(args.componentPath)
       ? args.componentPath
@@ -47,7 +53,13 @@ export async function getComponentProps(
     const resolved = resolveByName(cache.getByName(args.name), args.name, args.file);
     if (resolved === null) return nameNotFound(args.name, cache);
     if (isAmbiguousMatch(resolved)) return resolved;
-    return parseProps(resolved.path, resolved.relativePath, "", parser, cache);
+    const sym = symbolMatch(
+      resolved,
+      args.name,
+      "Props are the declared interface of the file's component, not of this export."
+    );
+    const props = await parseProps(resolved.path, resolved.relativePath, "", parser, cache);
+    return sym.isPrimaryExport ? props : { ...props, ...sym };
   }
 
   throw new Error(

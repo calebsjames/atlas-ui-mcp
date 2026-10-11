@@ -41,6 +41,49 @@ export function resolveExportedName(c: Component, name: string): string | undefi
   return (c.exportedNames || []).find((n) => n.toLowerCase() === query);
 }
 
+/**
+ * How a by-name lookup relates to the FILE node it resolved to. A secondary
+ * export (`isOrderItemSettled` in a module whose catalog name is
+ * `OUTSTANDING_ORDER_ITEM_STATUSES`) must be reported as such, with the
+ * file-level fields called out — otherwise the answer silently describes a
+ * different symbol.
+ */
+export interface SymbolMatch {
+  isPrimaryExport: boolean;
+  /** The exported symbol the query matched — set only when it is NOT the primary. */
+  matchedExport?: string;
+  /** The module's catalog name, when the match is a secondary export. */
+  modulePrimaryName?: string;
+  /** The module's other exports (secondary matches only). */
+  siblingExports?: string[];
+  /** Which fields describe the whole module rather than this symbol (secondary only). */
+  caveat?: string;
+}
+
+/**
+ * Classify `query` against the node it resolved to. A match on the node's own
+ * name or its fileAlias is primary; a match on another exported name is not.
+ * `fileLevel` names the fields the calling tool reports from the FILE.
+ */
+export function symbolMatch(node: Component, query: string, fileLevel: string): SymbolMatch {
+  const q = query.toLowerCase();
+  if (node.name.toLowerCase() === q || node.fileAlias?.toLowerCase() === q) {
+    return { isPrimaryExport: true };
+  }
+  const matched = resolveExportedName(node, query);
+  if (!matched) return { isPrimaryExport: true };
+  const siblings = (node.exportedNames || []).filter((n) => n.toLowerCase() !== q);
+  return {
+    isPrimaryExport: false,
+    matchedExport: matched,
+    modulePrimaryName: node.name,
+    ...(siblings.length ? { siblingExports: siblings.slice(0, 20) } : {}),
+    caveat:
+      `"${matched}" is a secondary export of ${node.relativePath}, whose catalog name is ` +
+      `"${node.name}" (layer "${node.architectureLayer}" describes the file). ${fileLevel}`,
+  };
+}
+
 /** Does this component's path contain the `file` substring? No filter = match. */
 export function matchesFile(c: Component, file?: string): boolean {
   if (!file) return true;
