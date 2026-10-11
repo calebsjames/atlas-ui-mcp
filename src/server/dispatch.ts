@@ -6,6 +6,7 @@ import type { BrowserSession } from "../browser/session.js";
 import type { ArchitectureLayer, BrowserConfig, ProjectConfig } from "../types.js";
 import type { WaitUntil } from "../browser/quiet.js";
 import { compactContent, serializeResult } from "./serialize.js";
+import { describeProbe } from "../browser/preflight.js";
 import { listAllComponents } from "../tools/listAllComponents.js";
 import { searchComponents } from "../tools/searchComponents.js";
 import { getComponentProps } from "../tools/getComponentProps.js";
@@ -267,17 +268,40 @@ function jsonResponse(data: unknown, workspaceRoot: string) {
  * content directly (text + screenshot image); everything else returns plain
  * data we JSON-wrap. Errors come back as an isError text payload.
  */
+/** Tools that drive the browser against the dev server. */
+const RUNTIME_TOOLS = new Set([
+  "render_component", "check_page", "verify_data_flow", "capture_flow", "inspect_rendered_page", "reset_login",
+]);
+
 export async function dispatchToolCall(name: string, args: ToolArgs, ctx: ToolContext) {
   const handler = HANDLERS[name];
+  const runtime = RUNTIME_TOOLS.has(name);
   try {
     if (!handler) throw new Error(`Unknown tool: ${name}`);
+    if (runtime) {
+      // Preflight: don't launch a browser at a dev server that isn't there,
+      // or is answering with a server error.
+      const probe = await ctx.browser.preflight();
+      if (!probe.reachable || (probe.status ?? 0) >= 500) {
+        throw new Error(
+          `The dev server is not serving the app — ${describeProbe(probe)}. Start it (or fix ` +
+            "browser.devServerUrl in .atlas-ui.json), then retry. Static tools still work."
+        );
+      }
+    }
     const result = await handler(args, ctx);
     if (result && typeof result === "object" && Array.isArray((result as any).content)) {
       return compactContent(result as { content: unknown[] }, { workspaceRoot: ctx.workspaceRoot });
     }
     return jsonResponse(result, ctx.workspaceRoot);
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : "Unknown error";
+    let errorMessage = error instanceof Error ? error.message : "Unknown error";
+    if (runtime && !errorMessage.includes("dev server GET")) {
+      // Every runtime error says what the dev server answered, so a failure is
+      // never mistaken for (or blamed on) the environment without evidence.
+      const probe = await ctx.browser.preflight().catch(() => undefined);
+      if (probe) errorMessage += ` [${describeProbe(probe)}]`;
+    }
     return {
       content: [
         {

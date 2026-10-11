@@ -24,6 +24,7 @@ import {
   type WaitUntil,
 } from "./quiet.js";
 import { errMessage, toAbsoluteUrl } from "../util.js";
+import { probeDevServer, type DevServerProbe } from "./preflight.js";
 
 /**
  * Skip body summarization above this size — record the byte count, but don't
@@ -114,6 +115,7 @@ export class BrowserSession {
    */
   updateConfig(config: BrowserConfig): void {
     this.config = config;
+    this.lastProbe = null;
     this.outputDirAbs = path.resolve(
       this.workspaceRoot,
       config.outputDir || ".atlas-ui/captures"
@@ -122,6 +124,21 @@ export class BrowserSession {
 
   get baseUrl(): string {
     return this.config.devServerUrl || "http://localhost:5173";
+  }
+
+  private lastProbe: { at: number; probe: DevServerProbe } | null = null;
+
+  /**
+   * Is the dev server answering, and with what? Cached for a few seconds so a
+   * burst of calls probes once. Runtime tools run this first and every
+   * runtime error quotes it, so "timeout" never stands in for "the server is
+   * down" or "it's serving something else".
+   */
+  async preflight(maxAgeMs = 5_000): Promise<DevServerProbe> {
+    if (this.lastProbe && Date.now() - this.lastProbe.at < maxAgeMs) return this.lastProbe.probe;
+    const probe = await probeDevServer(this.baseUrl);
+    this.lastProbe = { at: Date.now(), probe };
+    return probe;
   }
 
   /** The configured profile names (`browser.profiles`), plus "default" when browser.login is set. */
@@ -366,10 +383,35 @@ export class BrowserSession {
       // Let the auth token settle into storage before the first real navigation.
       await page.waitForTimeout(500);
     } catch (err) {
+      // Say where the login stopped: the URL, the page title, and a screenshot
+      // of that state — a bare selector timeout sent agents to wrong theories.
+      const where = await this.describeFailedPage(page, "login-failed");
       throw new Error(
-        `Login pre-step failed (${errMessage(err)}). Check browser.login selectors, success check, and credentials.`
+        `Login pre-step failed (${errMessage(err).split("\n")[0]}). ${where} ` +
+          "Check browser.login selectors, success check, and credentials."
       );
     }
+  }
+
+  /** `Stopped at <url> "<title>" (screenshot: <path>)` for an error message. */
+  private async describeFailedPage(page: Page, stem: string): Promise<string> {
+    const url = (() => {
+      try {
+        return page.url();
+      } catch {
+        return "(unknown)";
+      }
+    })();
+    const title = await page.title().catch(() => "");
+    let shot = "";
+    try {
+      const file = await this.screenshotFile(stem);
+      await page.screenshot({ path: file });
+      shot = ` (screenshot: ${file})`;
+    } catch {
+      /* page gone — no screenshot */
+    }
+    return `Stopped at ${url}${title ? ` "${title}"` : " (no <title>)"}${shot}.`;
   }
 
   /**
