@@ -345,7 +345,7 @@ export const CATALOG_TOOLS = [
   {
     name: "server_info",
     description:
-      "Which atlas-ui code is answering and against what: version, git sha + dirty flag of the atlas-ui install, dist build time vs this process's start (a `build.stale` note means the running server is OLDER than the build on disk — reconnect the MCP), workspaceRoot, the effective config, catalog size / lastScanned / byLayer / unscannedDirs (directories under src/ the catalog does not index), browser login state, and whether the dev server answers (HTTP status + page <title>). Pass refresh:true to reload the WHOLE .atlas-ui.json (scan targets, aliases, route files, browser) and rescan the catalog without restarting — use it after editing config, or when results look stale.",
+      "Which atlas-ui code is answering and against what: version, git sha + dirty flag of the atlas-ui install, dist build time vs this process's start (a `build.stale` note means the running server is OLDER than the build on disk — reconnect the MCP), workspaceRoot, the effective config, catalog size / lastScanned / byLayer / unscannedDirs (directories under src/ the catalog does not index), browser login state per profile with WHO it signs in as (`account`: the login email resolved from config/env — never a password — and the app's own signed-in user, roles and impersonation as last read from storage), and whether the dev server answers (HTTP status + page <title>). Pass refresh:true to reload the WHOLE .atlas-ui.json (scan targets, aliases, route files, browser) and rescan the catalog without restarting — use it after editing config, or when results look stale.",
     inputSchema: {
       type: "object",
       properties: {

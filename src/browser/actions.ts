@@ -1,12 +1,26 @@
-import type { Locator, Page } from "playwright";
+import type { FileChooser, Locator, Page } from "playwright";
 import type { ApiCall, FlowAction, Measurement, NetworkEntry } from "./types.js";
 import { isApiRequest } from "./network.js";
+import { resolveUploadFiles } from "./upload.js";
+
+/** What an action needs from its caller beyond the page. */
+export interface ActionContext {
+  /** Where relative `upload` file paths resolve (the workspace root). */
+  baseDir?: string;
+}
+
+/** What an action reports back: a measurement (`measure`), or a detail for the performed line. */
+export interface ActionOutcome {
+  measurement?: Measurement;
+  /** Appended to describeAction's line, e.g. which files an upload set. */
+  detail?: string;
+}
 
 /**
  * Execute one interaction. Throws (with Playwright's message) if it can't.
- * Returns a Measurement for the read-only `measure` action, else nothing.
+ * Returns the Measurement of a read-only `measure`, or a detail line.
  */
-export async function runAction(page: Page, a: FlowAction): Promise<Measurement | undefined> {
+export async function runAction(page: Page, a: FlowAction, ctx: ActionContext = {}): Promise<ActionOutcome | undefined> {
   const timeout = a.timeoutMs ?? 10_000;
   const need = (v: string | undefined, field: string): string => {
     if (!v) throw new Error(`Action "${a.type}" requires a ${field}.`);
@@ -17,7 +31,7 @@ export async function runAction(page: Page, a: FlowAction): Promise<Measurement 
     await page.waitForTimeout(a.ms ?? a.timeoutMs ?? 1000);
     return;
   }
-  if (a.type === "measure") return measure(page, need(a.selector, "selector"), a.properties);
+  if (a.type === "measure") return { measurement: await measure(page, need(a.selector, "selector"), a.properties) };
 
   // Selector-less variants never resolve a target.
   if (!a.selector && !a.within) {
@@ -54,6 +68,10 @@ export async function runAction(page: Page, a: FlowAction): Promise<Measurement 
 
   try {
     switch (a.type) {
+      case "drag":
+        return { detail: await drag(page, a, target, timeout) };
+      case "upload":
+        return { detail: await upload(page, a, base, target, timeout, ctx) };
       case "click":
         await target.click({ timeout });
         return;
@@ -89,6 +107,97 @@ export async function runAction(page: Page, a: FlowAction): Promise<Measurement 
   } catch (err) {
     throw await explainHiddenMatches(err, base, a);
   }
+}
+
+/** Box + centre of a visible element (waits for it to be visible). */
+async function centreOf(loc: Locator, timeout: number, what: string) {
+  await loc.waitFor({ state: "visible", timeout });
+  const b = await loc.boundingBox();
+  if (!b) throw new Error(`drag: the ${what} has no box (not rendered).`);
+  return { ...b, cx: b.x + b.width / 2, cy: b.y + b.height / 2 };
+}
+
+/**
+ * Real pointer drag: press on the source's centre, move in `steps` to the drop
+ * point, release. Chromium turns this into pointer/mouse events for
+ * pointer-driven widgets (sliders, sortable lists) AND into native HTML5
+ * dragstart/dragover/drop for `draggable` elements — the same machinery as
+ * Playwright's dragTo, with an explicit drop point.
+ */
+async function drag(page: Page, a: FlowAction, source: Locator, timeout: number): Promise<string> {
+  if (!a.toSelector && !a.to) throw new Error('Action "drag" requires "toSelector" or "to": {x, y}.');
+  if (a.to && (typeof a.to.x !== "number" || typeof a.to.y !== "number")) {
+    throw new Error('Action "drag": "to" must be {x: number, y: number}.');
+  }
+  await source.scrollIntoViewIfNeeded({ timeout });
+  const from = await centreOf(source, timeout, `source ${a.selector}`);
+  let x: number;
+  let y: number;
+  if (a.toSelector) {
+    const t = await centreOf(page.locator(a.toSelector).filter({ visible: true }).first(), timeout, `target ${a.toSelector}`);
+    ({ x, y } = a.to ? { x: t.x + a.to.x, y: t.y + a.to.y } : { x: t.cx, y: t.cy });
+  } else {
+    ({ x, y } = { x: from.cx + a.to!.x, y: from.cy + a.to!.y });
+  }
+  const vp = page.viewportSize();
+  if (vp && (x < 0 || y < 0 || x > vp.width || y > vp.height)) {
+    throw new Error(
+      `drag: the drop point (${Math.round(x)}, ${Math.round(y)}) is outside the ${vp.width}x${vp.height} viewport — ` +
+        "scroll so both ends are on screen first, or use a taller `viewport`."
+    );
+  }
+  const steps = Math.max(1, Math.min(Math.round(a.steps ?? 12), 200));
+  await page.mouse.move(from.cx, from.cy);
+  await page.mouse.down();
+  await page.mouse.move(x, y, { steps });
+  await page.mouse.up();
+  return `from (${Math.round(from.cx)}, ${Math.round(from.cy)}) to (${Math.round(x)}, ${Math.round(y)}) in ${steps} steps`;
+}
+
+/**
+ * Set files on an `<input type=file>` (hidden ones included — styled upload
+ * controls hide the input), or click any other element and answer the file
+ * chooser it opens (apps that create the input on the fly). Without `files`,
+ * a bundled fixture is picked by the input's `accept`.
+ */
+async function upload(
+  page: Page,
+  a: FlowAction,
+  base: Locator,
+  visible: Locator,
+  timeout: number,
+  ctx: ActionContext
+): Promise<string> {
+  const first = base.first();
+  await first.waitFor({ state: "attached", timeout });
+  const input = await first.evaluate((el) =>
+    el instanceof HTMLInputElement && el.type === "file" ? { accept: el.accept || "", multiple: el.multiple } : null
+  );
+  let chooser: FileChooser | undefined;
+  let accept: string;
+  let multiple: boolean;
+  if (input) {
+    ({ accept, multiple } = input);
+  } else {
+    try {
+      [chooser] = await Promise.all([page.waitForEvent("filechooser", { timeout }), visible.click({ timeout })]);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message.split("\n")[0] : String(err);
+      throw new Error(
+        `Action "upload": ${a.selector} is not an <input type=file> and clicking it opened no file chooser (${msg}). ` +
+          "Point the selector at the file input, or at the control that opens the file picker."
+      );
+    }
+    accept = (await chooser.element().getAttribute("accept").catch(() => null)) ?? "";
+    multiple = chooser.isMultiple();
+  }
+  const files = await resolveUploadFiles(a.files, accept, ctx.baseDir);
+  if (files.paths.length > 1 && !multiple) {
+    throw new Error(`Action "upload": ${files.paths.length} files given, but the input takes one (no "multiple").`);
+  }
+  if (chooser) await chooser.setFiles(files.paths, { timeout });
+  else await first.setInputFiles(files.paths, { timeout });
+  return `${files.detail} via ${chooser ? "the file chooser" : "the file input"}`;
 }
 
 /**
@@ -169,10 +278,18 @@ async function measure(page: Page, selector: string, properties?: string[]): Pro
   return { selector, count, elements, page: pageInfo };
 }
 
-/** One-line, secret-safe description of an action for the report. */
-export function describeAction(a: FlowAction): string {
+/** One-line, secret-safe description of an action for the report (`detail` from its outcome). */
+export function describeAction(a: FlowAction, detail?: string): string {
   const scope = a.within ? ` within "${a.within}"` : "";
   switch (a.type) {
+    case "drag":
+      return (
+        (a.toSelector
+          ? `dragged ${a.selector}${scope} onto ${a.toSelector}${a.to ? ` at (+${a.to.x}, +${a.to.y})` : ""}`
+          : `dragged ${a.selector}${scope} by (${a.to?.x ?? 0}, ${a.to?.y ?? 0})`) + (detail ? ` — ${detail}` : "")
+      );
+    case "upload":
+      return `uploaded ${detail ?? "file(s)"} to ${a.selector}${scope}`;
     case "fill":
       // Show length, not value — fields may hold passwords/tokens.
       return `filled ${a.selector}${scope} (${(a.text ?? "").length} chars)`;
@@ -216,7 +333,7 @@ export function toApiCalls(requests: NetworkEntry[]): ApiCall[] {
     const key = r.method + " " + p;
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({ method: r.method, path: p, status: r.status, ...bodyFields(r) });
+    out.push({ method: r.method, path: p, status: r.status, ...bodyFields(r), ...(r.mocked ? { mocked: true } : {}) });
     if (out.length >= MAX_PER_SLICE) break;
   }
   return out;

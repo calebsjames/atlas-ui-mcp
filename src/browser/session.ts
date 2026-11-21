@@ -3,16 +3,21 @@ import path from "path";
 import type { Browser, BrowserContext, Page } from "playwright";
 import type { BrowserConfig, BrowserLoginConfig } from "../types.js";
 import type {
+  ApiMock,
   CaptureOptions,
   CaptureResult,
   ConsoleEntry,
   FlowAction,
   FlowStepResult,
   Measurement,
+  MockReport,
   NetworkEntry,
   ResolvedFlowStep,
+  SignedInAs,
 } from "./types.js";
-import { describeAction, runAction, toApiCalls } from "./actions.js";
+import { describeAction, runAction, toApiCalls, type ActionContext } from "./actions.js";
+import { compileMocks, MockRouter } from "./mockApi.js";
+import { describeUser, extractIdentity, loginAccount, readStorageEntries, type ExtractedIdentity } from "./identity.js";
 import { isApiRequest, summarizeJsonBody } from "./network.js";
 import {
   blockingRequests,
@@ -43,7 +48,14 @@ interface DiagBuffers {
   pending: Promise<void>[];
   /** Requests issued but not yet finished/failed — what the quiet window watches. */
   inflight: Map<unknown, InflightRequest>;
+  /** Each Request's entry, so a stub can mark exactly the request it fulfilled. */
+  byRequest: WeakMap<object, NetworkEntry>;
+  /** Requests a `mockApi` stub fulfilled (in case the route fires before the request event). */
+  mocked: WeakSet<object>;
 }
+
+/** What the app's storage said about the signed-in user, and when/where it was read. */
+type ObservedIdentity = ExtractedIdentity & { observedAt: string; url: string };
 
 /** Default page.goto timeout (browser.navigationTimeoutMs overrides). */
 const DEFAULT_NAV_TIMEOUT_MS = 30_000;
@@ -73,6 +85,8 @@ interface Profile {
   sessionSnapshot: { origin: string; entries: [string, string][] } | null;
   /** The URL the last call's page ended on — a flow whose first step has no target reopens it. */
   lastUrl: string | null;
+  /** The app's signed-in user as last read from this profile's storage (for server_info). */
+  identity: ObservedIdentity | null;
 }
 
 /** Per-call page options shared by every runtime entry point. */
@@ -172,7 +186,7 @@ export class BrowserSession {
     if (!p) {
       p = {
         name, context: null, page: null, diag: null, loggedIn: false,
-        loginError: null, sessionSnapshot: null, lastUrl: null,
+        loginError: null, sessionSnapshot: null, lastUrl: null, identity: null,
       };
       this.profiles.set(name, p);
     }
@@ -297,6 +311,7 @@ export class BrowserSession {
       p.loggedIn = true;
       // The token the login wrote to sessionStorage must reach later pages.
       await this.snapshotSession(p, p.page!);
+      await this.observeIdentity(p, p.page!);
     } catch (err) {
       p.loginError = errMessage(err);
       throw err;
@@ -308,26 +323,132 @@ export class BrowserSession {
     return !!this.config.login;
   }
 
-  /** Login state for server_info: configured, logged in, or stuck on an error — per profile. */
+  /**
+   * Login state for server_info: configured, logged in, or stuck on an error —
+   * per profile — and who each is signed in as (`account`: the login email
+   * from config/env, plus the app's user as last read from storage).
+   */
   loginState(): {
     configured: boolean;
     loggedIn: boolean;
     browserLaunched: boolean;
     error?: string;
-    profiles?: Array<{ name: string; loggedIn: boolean; error?: string }>;
+    account?: SignedInAs;
+    profiles?: Array<{ name: string; loggedIn: boolean; error?: string; account: SignedInAs }>;
   } {
     const d = this.profiles.get(DEFAULT_PROFILE);
     const named = Object.keys(this.config.profiles ?? {}).map((name) => {
       const p = this.profiles.get(name);
-      return { name, loggedIn: !!p?.loggedIn, ...(p?.loginError ? { error: p.loginError } : {}) };
+      return {
+        name,
+        loggedIn: !!p?.loggedIn,
+        ...(p?.loginError ? { error: p.loginError } : {}),
+        account: this.describeSignedIn(name, p?.identity ?? null, { lastKnown: true }),
+      };
     });
     return {
       configured: !!this.config.login,
       loggedIn: !!d?.loggedIn,
       browserLaunched: !!this.browser,
       ...(d?.loginError ? { error: d.loginError } : {}),
+      ...(this.config.login ? { account: this.describeSignedIn(DEFAULT_PROFILE, d?.identity ?? null, { lastKnown: true }) } : {}),
       ...(named.length ? { profiles: named } : {}),
     };
+  }
+
+  /**
+   * Read the app's signed-in user from the page's storage (when the page is on
+   * the app's origin) and remember it on the profile. When it can't be read,
+   * returns why (a string) and keeps the profile's previous observation.
+   */
+  private async observeIdentity(p: Profile, page: Page): Promise<ObservedIdentity | string> {
+    try {
+      if (page.isClosed()) return "the page was closed";
+      const url = page.url();
+      if (!/^https?:/.test(url)) return `the page ended on ${url}`;
+      const origin = new URL(url).origin;
+      if (origin !== new URL(this.baseUrl).origin) return `the page ended on ${origin}, not the app's origin`;
+      const observed: ObservedIdentity = {
+        ...extractIdentity(await readStorageEntries(page)),
+        observedAt: new Date().toISOString(),
+        url,
+      };
+      p.identity = observed;
+      return observed;
+    } catch (err) {
+      return `storage could not be read (${errMessage(err).split("\n")[0]})`;
+    }
+  }
+
+  /**
+   * Who a profile is signed in as: the login email (config/env), login state,
+   * and the app's user from `observed` (this call's read, or — with
+   * `lastKnown` — the profile's last read, dated).
+   */
+  private describeSignedIn(
+    name: string,
+    observed: ObservedIdentity | string | null,
+    opts: { loginSkipped?: boolean; lastKnown?: boolean } = {}
+  ): SignedInAs {
+    const login = name === DEFAULT_PROFILE ? this.config.login : this.config.profiles?.[name];
+    const p = this.profiles.get(name);
+    const acct = loginAccount(login);
+    const seen = observed && typeof observed === "object" ? observed : undefined;
+    const app = seen?.user;
+    const mismatch = !!(acct.loginEmail && app?.email && acct.loginEmail.toLowerCase() !== app.email.toLowerCase());
+    const imp = seen?.impersonating;
+
+    const parts: string[] = [];
+    if (!login) parts.push("no login configured for this profile");
+    else if (acct.loginEmail) parts.push(`login: ${acct.loginEmail} (${acct.loginEmailFrom})`);
+    else parts.push(`login email unknown${acct.loginEmailFrom ? ` (${acct.loginEmailFrom})` : ""}`);
+    if (opts.loginSkipped) parts.push("login skipped (public call)");
+    if (seen) {
+      parts.push(
+        app
+          ? `app user: ${describeUser(app)}${mismatch ? " — NOT the login email" : ""}`
+          : "app user: none found in localStorage/sessionStorage"
+      );
+      if (imp) parts.push(`${imp.active ? "impersonating" : `impersonation state (${imp.phase ?? "inactive"})`}: ${describeUser(imp.as)}`);
+    } else if (typeof observed === "string") {
+      parts.push(`app user not read: ${observed}`);
+    } else if (opts.lastKnown) {
+      parts.push("app user not read yet (no runtime call on this profile)");
+    }
+
+    return {
+      profile: name,
+      loginConfigured: !!login,
+      loggedIn: !!p?.loggedIn,
+      ...(opts.loginSkipped ? { loginSkipped: true } : {}),
+      ...acct,
+      ...(app ? { app } : {}),
+      ...(seen?.alsoFound ? { alsoFound: seen.alsoFound } : {}),
+      ...(seen && (app || imp) ? { impersonating: imp ?? false } : {}),
+      ...(typeof observed === "string" ? { appUnread: observed } : {}),
+      ...(seen && opts.lastKnown ? { observedAt: seen.observedAt } : {}),
+      ...(mismatch ? { mismatch: true } : {}),
+      summary: parts.join("; "),
+    };
+  }
+
+  /**
+   * Who `loginAs` (default profile when omitted) is signed in as, from the
+   * page its last call used — for tools that drive the page via withPage.
+   */
+  signedInAs(loginAs?: string, opts: { loginSkipped?: boolean } = {}): SignedInAs {
+    const name = loginAs ?? DEFAULT_PROFILE;
+    return this.describeSignedIn(name, this.lastObservation.get(name) ?? null, opts);
+  }
+
+  /** This session's most recent per-call identity read, per profile (string = why unread). */
+  private lastObservation = new Map<string, ObservedIdentity | string>();
+
+  /** Observe identity at the end of a call and remember it as that call's answer. */
+  private async endOfCallIdentity(p: Profile, page: Page, loginSkipped: boolean): Promise<SignedInAs> {
+    const observed = await this.observeIdentity(p, page);
+    this.lastObservation.set(p.name, observed);
+    return this.describeSignedIn(p.name, observed, { loginSkipped });
   }
 
   /**
@@ -419,15 +540,35 @@ export class BrowserSession {
    * (console errors/warnings, uncaught exceptions, failed + all network requests).
    */
   async capture(url: string, opts: CaptureOptions = {}): Promise<CaptureResult> {
-    const { page, diag } = await this.ensurePage({
+    // Validate stubs before any browser work, so a typo fails fast.
+    const router = mockRouter(opts.mockApi);
+    const { page, diag, profile } = await this.ensurePage({
       requireAuth: opts.requireAuth !== false,
       loginAs: opts.loginAs,
       viewport: opts.viewport,
     });
+    // Stubs go on AFTER login (login traffic is real) and come off when the
+    // call ends, even if it throws.
+    try {
+      if (router) await router.install(page, (req) => this.markMocked(diag, req));
+      return await this.captureOnPage(page, diag, profile, url, opts, router);
+    } finally {
+      await router?.uninstall();
+    }
+  }
 
+  private async captureOnPage(
+    page: Page,
+    diag: DiagBuffers,
+    profile: Profile,
+    url: string,
+    opts: CaptureOptions,
+    router: MockRouter | undefined
+  ): Promise<CaptureResult> {
     // Record buffer positions so we report only THIS call's diagnostics, not
     // everything accumulated on the shared page since login.
     const mark = this.markDiag(diag);
+    const actx = this.actionContext();
 
     const start = Date.now();
     let pendingRequests: string[] | undefined;
@@ -448,9 +589,9 @@ export class BrowserSession {
     const measurements: Measurement[] = [];
     for (const action of opts.actions || []) {
       try {
-        const out = await runAction(page, action);
-        if (out) measurements.push(out);
-        performed.push(describeAction(action));
+        const out = await runAction(page, action, actx);
+        if (out?.measurement) measurements.push(out.measurement);
+        performed.push(describeAction(action, out?.detail));
       } catch (err) {
         actionError = errMessage(err);
         break;
@@ -468,7 +609,7 @@ export class BrowserSession {
         actionError ??= `measure ${selector}: ${errMessage(err)}`;
         return undefined;
       });
-      if (out) measurements.push(out);
+      if (out?.measurement) measurements.push(out.measurement);
     }
     const viewport = page.viewportSize() ?? undefined;
 
@@ -489,6 +630,7 @@ export class BrowserSession {
     const pageErrors = diag.pageErrors.slice(mark.pe);
     const failedRequests = diag.failedRequests.slice(mark.fr);
     const requests = diag.requests.slice(mark.rq);
+    const signedInAs = await this.endOfCallIdentity(profile, page, opts.requireAuth === false);
 
     return {
       url,
@@ -505,12 +647,25 @@ export class BrowserSession {
       ...(pendingRequests?.length ? { pendingRequests } : {}),
       ...(measurements.length ? { measurements } : {}),
       ...(viewport ? { viewport } : {}),
+      ...(router ? { mockApi: router.report(requests) } : {}),
+      signedInAs,
       clean:
         consoleErrors.length === 0 &&
         pageErrors.length === 0 &&
         failedRequests.length === 0,
       durationMs,
     };
+  }
+
+  /** Flag the entry of a request a stub fulfilled. */
+  private markMocked(diag: DiagBuffers, req: object): void {
+    diag.mocked.add(req);
+    const entry = diag.byRequest.get(req);
+    if (entry) entry.mocked = true;
+  }
+
+  private actionContext(): ActionContext {
+    return { baseDir: this.workspaceRoot };
   }
 
   /**
@@ -580,8 +735,13 @@ export class BrowserSession {
     fn: (page: Page) => Promise<T>,
     opts: PageOptions = {}
   ): Promise<T> {
-    const { page } = await this.ensurePage({ ...opts, requireAuth: opts.requireAuth !== false });
-    return fn(page);
+    const { page, profile } = await this.ensurePage({ ...opts, requireAuth: opts.requireAuth !== false });
+    try {
+      return await fn(page);
+    } finally {
+      // Who the page was signed in as, for the caller's signedInAs().
+      this.lastObservation.set(profile.name, await this.observeIdentity(profile, page));
+    }
   }
 
   /**
@@ -593,8 +753,21 @@ export class BrowserSession {
    */
   async runFlow(
     steps: ResolvedFlowStep[],
-    opts: { settleMs?: number; waitUntil?: WaitUntil } & PageOptions = {}
+    opts: { settleMs?: number; waitUntil?: WaitUntil; mockApi?: ApiMock[] } & PageOptions = {}
   ): Promise<FlowStepResult[]> {
+    return (await this.runFlowDetailed(steps, opts)).steps;
+  }
+
+  /**
+   * runFlow plus the flow-level facts: who the page was signed in as at the
+   * end, and what `mockApi` stubs did across all steps. Stubs are installed
+   * after login and removed when the flow ends, even on error.
+   */
+  async runFlowDetailed(
+    steps: ResolvedFlowStep[],
+    opts: { settleMs?: number; waitUntil?: WaitUntil; mockApi?: ApiMock[] } & PageOptions = {}
+  ): Promise<{ steps: FlowStepResult[]; signedInAs: SignedInAs; mockApi?: MockReport }> {
+    const router = mockRouter(opts.mockApi);
     // One fresh page for the whole flow, logged in as the requested profile
     // (requireAuth:false for a public flow). Steps share it.
     const { page, diag, profile } = await this.ensurePage({
@@ -602,6 +775,29 @@ export class BrowserSession {
       loginAs: opts.loginAs,
       viewport: opts.viewport,
     });
+    const flowMark = this.markDiag(diag);
+    try {
+      if (router) await router.install(page, (req) => this.markMocked(diag, req));
+      const results = await this.runFlowSteps(page, diag, profile, steps, opts);
+      await this.settlePending(diag);
+      const signedInAs = await this.endOfCallIdentity(profile, page, opts.requireAuth === false);
+      return {
+        steps: results,
+        signedInAs,
+        ...(router ? { mockApi: router.report(diag.requests.slice(flowMark.rq)) } : {}),
+      };
+    } finally {
+      await router?.uninstall();
+    }
+  }
+
+  private async runFlowSteps(
+    page: Page,
+    diag: DiagBuffers,
+    profile: Profile,
+    steps: ResolvedFlowStep[],
+    opts: { settleMs?: number; waitUntil?: WaitUntil }
+  ): Promise<FlowStepResult[]> {
     const results: FlowStepResult[] = [];
 
     // The page is fresh. A flow that starts by acting "on the current page"
@@ -654,9 +850,9 @@ export class BrowserSession {
         );
       }
       for (const action of step.actions || []) {
-        const out = await runAction(page, action);
-        if (out) measurements.push(out);
-        performed.push(describeAction(action));
+        const out = await runAction(page, action, this.actionContext());
+        if (out?.measurement) measurements.push(out.measurement);
+        performed.push(describeAction(action, out?.detail));
       }
       if (step.actions?.length && waitUntil === "quiet") {
         pendingRequests = (await this.waitForQuiet(page)) ?? pendingRequests;
@@ -749,6 +945,8 @@ export class BrowserSession {
       byUrl: new Map(),
       pending: [],
       inflight: new Map(),
+      byRequest: new WeakMap(),
+      mocked: new WeakSet(),
     };
     this.diagByPage.set(page, d);
     const idleIgnore = this.config.idleIgnore ?? [];
@@ -764,9 +962,11 @@ export class BrowserSession {
         url: req.url(),
         method: req.method(),
         resourceType: req.resourceType(),
+        ...(d.mocked.has(req) ? { mocked: true } : {}),
       };
       d.requests.push(entry);
       d.byUrl.set(req.url() + req.method(), entry);
+      d.byRequest.set(req, entry);
       d.inflight.set(req, {
         method: req.method(),
         url: req.url(),
@@ -854,6 +1054,15 @@ export class BrowserSession {
     await this.browser?.close().catch(() => {});
     this.browser = null;
   }
+}
+
+/**
+ * A router for `mockApi`, validated up front; none for an absent or empty list.
+ * Anything else that isn't a list of stubs throws (never silently ignored).
+ */
+function mockRouter(mockApi: unknown): MockRouter | undefined {
+  if (mockApi == null || (Array.isArray(mockApi) && mockApi.length === 0)) return undefined;
+  return new MockRouter(compileMocks(mockApi));
 }
 
 /** Replace `${ENV_VAR}` in an action's text with process.env values. */

@@ -183,11 +183,13 @@ export async function inspectRenderedPage(
     mounted: typeof mounted;
     unmatched: string[];
     note?: string;
+    signedInAs: ReturnType<BrowserSession["signedInAs"]>;
   } = {
     url,
     framework: rendered.framework,
     mounted,
     unmatched,
+    signedInAs: session.signedInAs(args.loginAs),
   };
 
   if (rendered.framework === "unknown" || Object.keys(rendered.counts).length === 0) {

@@ -2,6 +2,7 @@ import type { BrowserSession } from "../browser/session.js";
 import { captureResponse, diagnostics, type McpContentResult } from "../browser/response.js";
 import { toAbsoluteUrl } from "../util.js";
 import type { WaitUntil } from "../browser/quiet.js";
+import type { ApiMock } from "../browser/types.js";
 
 /**
  * The "did my change break anything" workhorse. Navigate to a URL (absolute,
@@ -18,6 +19,7 @@ export async function checkPage(
     loginAs?: string;
     viewport?: { width: number; height: number };
     measure?: string[];
+    mockApi?: ApiMock[];
   },
   session: BrowserSession
 ): Promise<McpContentResult> {
@@ -32,6 +34,7 @@ export async function checkPage(
     loginAs: args.loginAs,
     viewport: args.viewport,
     measure: args.measure,
+    mockApi: args.mockApi,
   });
 
   return captureResponse({ url, ...diagnostics(capture) }, capture);

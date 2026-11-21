@@ -1,5 +1,54 @@
 # Changelog
 
+## Unreleased
+
+Four runtime capabilities from 36 Studio self-reviews: agents building a
+screen before its server part existed, drag and upload controls no flow could
+operate, and a preview showing different data than the agent with no way to
+rule out a different account.
+
+### Added
+
+- **`mockApi`** on `check_page`, `render_component`, `verify_data_flow` and
+  `capture_flow` (whole flow): `[{method?, path, query?, status?, json? |
+  body?, headers?}]`. Matching page requests (the ones `apiCalls` counts:
+  xhr/fetch or `/api/` URLs, by pathname on any origin; exact, `*`/`**` glob,
+  `re:` regex or full URL) are fulfilled with the stub for that call only;
+  the rest reach the real API. Installed after login, removed when the call
+  ends even on error. Stubbed calls carry `mocked: true` (in `apiCalls`, which
+  `check_page` / `render_component` now include when stubs are passed, and in
+  `verify_data_flow`'s matched/unexpected lists); `mockApi.unmatched` lists
+  stubs no request matched, with `nearMisses`. Bad stubs fail before the
+  browser starts; unknown keys get a did-you-mean. Aliases `mocks` / `stubs`.
+- **`drag` action** — `{selector, toSelector?, to?: {x, y}, steps?}`: real
+  pointer input (press, move in steps, release), so pointer-driven widgets
+  (sliders, sortable lists) and native HTML5 drag-and-drop both work. An
+  off-screen drop point is an error.
+- **`upload` action** — `{selector, files?}`: sets files on an
+  `<input type=file>` (hidden ones included) or clicks any other element and
+  answers the file chooser it opens (inputs created on the fly). Without
+  `files`, a bundled fixture is chosen by the input's `accept`: a tiny JPEG,
+  PNG or H.264 MP4 (`fixtures/upload/`, shipped in the package; regenerate
+  with `node scripts/make-upload-fixtures.mjs`, which needs only Playwright's
+  Chromium).
+- **`signedInAs`** on every runtime result (`check_page`, `render_component`,
+  `verify_data_flow`, `capture_flow`, `inspect_rendered_page`) and per profile
+  in `server_info` (`login.account`, `login.profiles[].account`): the login
+  email resolved from config/env (secret-looking fields and env vars are never
+  read), the app's own signed-in user from localStorage/sessionStorage (user
+  JSON and JWT claims reduced to email/id/name/roles, `source` key named,
+  other users under `alsoFound`), impersonation state (`active`, `phase`,
+  `as`, `original`), `mismatch` when the app user is not the login email, and
+  a one-line `summary`.
+
+### Changed
+
+- `runAction` returns `{ measurement?, detail? }` (was a bare Measurement)
+  and takes an optional context (the workspace root for relative upload
+  paths); `BrowserSession.runFlowDetailed` returns the steps plus the
+  flow-level `signedInAs` and `mockApi` report (`runFlow` still returns the
+  steps).
+
 ## 3.1.0 — 2026-10-11
 
 Everything since 3.0.0: the symbol-honest work that shipped uncommitted from

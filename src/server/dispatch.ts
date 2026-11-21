@@ -5,6 +5,7 @@ import type { RouteAnalyzer } from "../analyzer/routeAnalyzer.js";
 import type { BrowserSession } from "../browser/session.js";
 import type { ArchitectureLayer, BrowserConfig, ProjectConfig } from "../types.js";
 import type { WaitUntil } from "../browser/quiet.js";
+import type { ApiMock } from "../browser/types.js";
 import { compactContent, serializeResult } from "./serialize.js";
 import { describeProbe } from "../browser/preflight.js";
 import { listAllComponents } from "../tools/listAllComponents.js";
@@ -65,21 +66,22 @@ function requireStringArg(args: ToolArgs, key: string): string {
  * Each alias fills its canonical argument only when the canonical is absent.
  */
 const NAME_ALIASES = ["component", "componentName", "symbol", "hook", "target"];
+const MOCK_ALIASES = ["mocks", "mock", "stubs", "apiMocks", "mockApis"];
 const ARG_ALIASES: Record<string, Record<string, string[]>> = {
   get_component_detail: { name: NAME_ALIASES, file: ["filePath"] },
   find_component_usages: { name: NAME_ALIASES, file: ["filePath"] },
   get_dependency_chain: { name: NAME_ALIASES, file: ["filePath"] },
   get_hook_detail: { name: NAME_ALIASES, file: ["filePath"] },
   get_data_flow: { name: NAME_ALIASES, file: ["filePath"] },
-  verify_data_flow: { name: NAME_ALIASES, file: ["filePath"] },
+  verify_data_flow: { name: NAME_ALIASES, file: ["filePath"], mockApi: MOCK_ALIASES },
   get_component_props: { name: NAME_ALIASES, componentPath: ["path", "filePath"] },
-  render_component: { component: ["name", "componentName"] },
+  render_component: { component: ["name", "componentName"], mockApi: MOCK_ALIASES },
   inspect_rendered_page: { component: ["name", "componentName"] },
-  check_page: { url: ["route", "path", "href"] },
+  check_page: { url: ["route", "path", "href"], mockApi: MOCK_ALIASES },
   search_components: { query: ["q", "name", "search", "term"] },
   find_similar_components: { description: ["query", "q", "text"] },
   whats_affected: { files: ["file", "paths"] },
-  capture_flow: { steps: ["flow"] },
+  capture_flow: { steps: ["flow"], mockApi: MOCK_ALIASES },
 };
 
 function normalizeArgs(tool: string, args: ToolArgs): ToolArgs {
@@ -218,6 +220,7 @@ const HANDLERS: Record<string, ToolHandler> = {
         loginAs: args?.loginAs as string | undefined,
         viewport: args?.viewport as { width: number; height: number } | undefined,
         measure: args?.measure as string[] | undefined,
+        mockApi: args?.mockApi as ApiMock[] | undefined,
       },
       ctx.browser, ctx.routeAnalyzer, ctx.scanner, ctx.cache, ctx.browserConfig
     ),
@@ -233,6 +236,7 @@ const HANDLERS: Record<string, ToolHandler> = {
         loginAs: args?.loginAs as string | undefined,
         viewport: args?.viewport as { width: number; height: number } | undefined,
         measure: args?.measure as string[] | undefined,
+        mockApi: args?.mockApi as ApiMock[] | undefined,
       },
       ctx.browser
     ),
@@ -249,6 +253,7 @@ const HANDLERS: Record<string, ToolHandler> = {
         actions: args?.actions as any[] | undefined,
         loginAs: args?.loginAs as string | undefined,
         viewport: args?.viewport as { width: number; height: number } | undefined,
+        mockApi: args?.mockApi as ApiMock[] | undefined,
       },
       ctx.browser, ctx.routeAnalyzer, ctx.scanner, ctx.cache, ctx.browserConfig
     ),
@@ -262,6 +267,7 @@ const HANDLERS: Record<string, ToolHandler> = {
         public: args?.public as boolean | undefined,
         loginAs: args?.loginAs as string | undefined,
         viewport: args?.viewport as { width: number; height: number } | undefined,
+        mockApi: args?.mockApi as ApiMock[] | undefined,
       },
       ctx.browser, ctx.routeAnalyzer, ctx.scanner, ctx.cache, ctx.browserConfig
     ),

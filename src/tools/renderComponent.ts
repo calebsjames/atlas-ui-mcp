@@ -5,6 +5,7 @@ import type { CacheManager } from "../cache/cacheManager.js";
 import type { BrowserConfig } from "../types.js";
 import { resolveRoute } from "../browser/resolveRoute.js";
 import { captureResponse, diagnostics, type McpContentResult } from "../browser/response.js";
+import type { ApiMock } from "../browser/types.js";
 
 /**
  * Render a catalog component (or a raw route) in the live app and screenshot it.
@@ -24,6 +25,7 @@ export async function renderComponent(
     loginAs?: string;
     viewport?: { width: number; height: number };
     measure?: string[];
+    mockApi?: ApiMock[];
   },
   session: BrowserSession,
   routeAnalyzer: RouteAnalyzer,
@@ -54,6 +56,7 @@ export async function renderComponent(
     loginAs: args.loginAs,
     viewport: args.viewport,
     measure: args.measure,
+    mockApi: args.mockApi,
     // Reveal a click-switched section (if any) after load, before the screenshot.
     actions: resolved.revealActions,
   });

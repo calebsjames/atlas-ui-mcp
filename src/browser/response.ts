@@ -1,4 +1,5 @@
 import type { CaptureResult } from "./types.js";
+import { toApiCalls } from "./actions.js";
 
 /**
  * An MCP tool result with mixed content. The server detects this shape and
@@ -49,6 +50,10 @@ export function diagnostics(capture: CaptureResult) {
     ...(capture.pendingRequests ? { pendingRequests: capture.pendingRequests } : {}),
     ...(capture.measurements ? { measurements: capture.measurements } : {}),
     ...(capture.viewport ? { viewport: capture.viewport } : {}),
+    // With stubs in play, show which calls were stubbed (`mocked: true`) next
+    // to the real ones, and what each stub matched.
+    ...(capture.mockApi ? { mockApi: capture.mockApi, apiCalls: toApiCalls(capture.requests) } : {}),
+    ...(capture.signedInAs ? { signedInAs: capture.signedInAs } : {}),
     screenshotPath: capture.screenshotPath,
   };
 }

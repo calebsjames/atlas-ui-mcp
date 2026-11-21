@@ -1,5 +1,5 @@
 import type { BrowserSession } from "../browser/session.js";
-import type { FlowAction, NetworkEntry } from "../browser/types.js";
+import type { ApiMock, FlowAction, NetworkEntry } from "../browser/types.js";
 import type { RouteAnalyzer } from "../analyzer/routeAnalyzer.js";
 import type { ComponentScanner } from "../scanner/componentScanner.js";
 import type { CacheManager } from "../cache/cacheManager.js";
@@ -32,6 +32,7 @@ export async function verifyDataFlow(
     actions?: FlowAction[];
     loginAs?: string;
     viewport?: { width: number; height: number };
+    mockApi?: ApiMock[];
   },
   session: BrowserSession,
   routeAnalyzer: RouteAnalyzer,
@@ -114,6 +115,7 @@ export async function verifyDataFlow(
     loginAs: args.loginAs,
     viewport: args.viewport,
     settleMs: args.settleMs ?? 500,
+    mockApi: args.mockApi,
     // Reveal a click-switched section first (if any), then run any caller
     // mutations — all before we read the network, so the section's own fetches
     // AND the mutations count as observed calls.
@@ -137,6 +139,7 @@ export async function verifyDataFlow(
     rowCount?: number;
     rowsFrom?: string;
     totalCount?: number;
+    mocked?: boolean;
   };
   const matched: Array<ObservedCall & { matchedPrefix: string }> = [];
   const unexpectedApiCalls: ObservedCall[] = [];
@@ -153,9 +156,9 @@ export async function verifyDataFlow(
     );
     if (hit) {
       const matchedPrefix = hit.method ? `${hit.method} ${hit.prefix}` : hit.prefix;
-      matched.push({ method: call.method, url: call.url, status: call.status, ...bodyFields(call), matchedPrefix });
+      matched.push({ method: call.method, url: call.url, status: call.status, ...bodyFields(call), ...mockedFlag(call), matchedPrefix });
     } else {
-      unexpectedApiCalls.push({ method: call.method, url: call.url, status: call.status, ...bodyFields(call) });
+      unexpectedApiCalls.push({ method: call.method, url: call.url, status: call.status, ...bodyFields(call), ...mockedFlag(call) });
     }
   }
 
@@ -208,6 +211,11 @@ export async function verifyDataFlow(
     },
     capture
   );
+}
+
+/** `{ mocked: true }` for a call a mockApi stub fulfilled, else nothing. */
+function mockedFlag(c: NetworkEntry): { mocked?: true } {
+  return c.mocked ? { mocked: true } : {};
 }
 
 /** Collapse repeated calls to the same method + path. */

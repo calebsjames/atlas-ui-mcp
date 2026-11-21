@@ -236,7 +236,7 @@ Traces the full data path: component → composable/hook/store → service → a
 A whole shell page traces to hundreds of chains, so a result above ~20k characters comes back as `mode: "summary"` — `allEndpoints` (complete), `chainCount`, per-owner counts and the services/adapters on the path; pass `summary: false` for every chain. An empty trace carries `resolved: true` and a `reason`, so "traced, nothing fetched" never looks like "not found" (`found: false`).
 
 ### `server_info`
-Which code is answering, against what: version, git sha + dirty flag of the atlas-ui install, build time vs this process's start (`build.stale` means the running server is older than the build on disk — reconnect the MCP), the workspace and effective config, catalog size / `lastScanned` / `unscannedDirs`, login state per profile, and a dev-server probe (status + `<title>`). `refresh: true` reloads the **whole** `.atlas-ui.json` and rescans without a restart.
+Which code is answering, against what: version, git sha + dirty flag of the atlas-ui install, build time vs this process's start (`build.stale` means the running server is older than the build on disk — reconnect the MCP), the workspace and effective config, catalog size / `lastScanned` / `unscannedDirs`, login state per profile with **who each profile signs in as** (`account`: the login email resolved from config/env, and the app's own user, roles and impersonation as last read from storage, with `observedAt`), and a dev-server probe (status + `<title>`). `refresh: true` reloads the **whole** `.atlas-ui.json` and rescans without a restart.
 
 > **Name collisions:** `get_component_detail`, `get_component_props`, `get_hook_detail`, `get_dependency_chain`, and `get_data_flow` resolve a name that matches several files only when one candidate is clearly meant — an exact-case primary name beats a camelCase file alias, and the component tools prefer the single renderable candidate — and then list the others under `alsoMatched`. Otherwise they return `{ ambiguous: true, candidates: [...] }`; re-call with `file` (a path substring). The same node reached twice (name + case-only alias) is never reported as ambiguous.
 >
@@ -251,7 +251,8 @@ Powered by Playwright/Chromium. They require your dev server to be running and d
 - **Preflight.** Each runtime call first GETs `devServerUrl`; an unreachable server or a 5xx fails fast without launching Chromium, and every runtime error ends with what the dev server answered (`[dev server GET http://… → 200 "My App"]`).
 - **Navigation settles on a quiet window**, not `networkidle`: `load`, then a bounded window (≤10 s) with no short-lived request in flight. SSE / websocket streams, long-polls and `browser.idleIgnore` URLs never hold it open, so an app with a realtime stream doesn't burn a 30 s timeout per call. `waitUntil` (`quiet` | `load` | `domcontentloaded` | `networkidle`) overrides it; a stalled wait lists the requests still in flight.
 - **A fresh page per call**, in the same browser context: cookies, localStorage and IndexedDB carry over, `sessionStorage` (where many SPAs keep their token) is carried from one page to the next, and a previous call's open modal can't swallow this call's clicks.
-- **Per call:** `viewport {width,height}` (that call only), `loginAs` (a `browser.profiles` role, own context), and on `check_page` / `render_component` a read-only `measure: [selectors]`.
+- **Per call:** `viewport {width,height}` (that call only), `loginAs` (a `browser.profiles` role, own context), on `check_page` / `render_component` a read-only `measure: [selectors]`, and on `check_page` / `render_component` / `verify_data_flow` / `capture_flow` **`mockApi`** — API stubs for that call only (see [Stubbing the API](#stubbing-the-api-mockapi)).
+- **Every result says who the browser was signed in as** (`signedInAs`, see [below](#who-the-browser-is-signed-in-as-signedinas)), so "I see different data than the preview" can be ruled in or out as a different account.
 
 ### `render_component`
 Render a catalog component in the live app and return a **screenshot plus runtime diagnostics** (console errors, uncaught exceptions, failed network requests). Resolves `component` → URL via the route map; or pass a raw `route`. Pass `params` for dynamic segments (e.g. `{"id": "123"}`). The screenshot comes back as an image the agent can look at. For a component that lives inside a one-route shell, pass `section` (see `get_section_map`) — or just name the section's child `component` — and it auto-reveals that section (query-append or activator click) before the shot, reporting how under `viewSection`.
@@ -264,7 +265,7 @@ The "did my change break anything" workhorse. Navigate to any `url` (absolute, o
 ### `verify_data_flow`
 Source-vs-runtime check. Renders a component's route, watches the **real network traffic**, and checks it against the endpoints `get_data_flow` predicts (child tree and stores included). Matching is method-aware — a predicted `GET /users` no longer "confirms" an observed `DELETE /users`. The key output is **`unexpectedApiCalls`** — observed calls that map to *no* predicted endpoint. That's the real drift signal: dynamic/template-literal URLs, app-level bootstrap fetches outside the component's tree, or genuine divergence. `verdict` is `confirmed` when every observed call is accounted for. (Predicted-but-unobserved endpoints are expected — a render exercises only a slice of what the subtree *could* call — so those are reported as a count, not a list.) Each observed call (matched or unexpected) also carries the response-body summary — `bytes`, `rowCount`, `rowsFrom`, `totalCount` — so drift and payload-shape can be read from one result.
 
-Pass `actions` (same shape as `capture_flow` actions) to drive the page after load and before the network is read — fill the form, click Save, and the resulting `POST` gets verified too. Without actions, only render-time calls (typically GETs) are observable.
+Pass `actions` (same shape as `capture_flow` actions) to drive the page after load and before the network is read — fill the form, click Save, and the resulting `POST` gets verified too. Without actions, only render-time calls (typically GETs) are observable. With `mockApi`, a stubbed call is still matched against the predictions and carries `mocked: true` — so a screen can be verified against an endpoint the server doesn't serve yet.
 
 ### `inspect_rendered_page`
 The reverse bridge. Opens a live page and reports which **catalog components are actually mounted** on it, mapped back to source files — "what do I edit to change the thing I'm looking at?" without grepping. Works by walking React/Vue dev internals, so it needs the dev build (not prod). Takes a catalog `component`, a `route`, or a raw `url`; returns `{ framework, mounted: [{name, count, relativePath, architectureLayer}], unmatched }`, text-only.
@@ -276,7 +277,11 @@ Drive a multi-step user flow against **one page** (fresh for each call) and scre
 
 Tip: `get_component_detail` exposes each component's `testIds` and `formFields` (with ready-made selectors) — build your steps from those instead of reading source.
 
-Each step's `actions` run in order. Supported action `type`s: `click`, `fill`, `select`, `check`, `uncheck`, `hover`, `press`, `waitFor`, `scroll` (into view, or by `x`/`y`), `wait` (`ms`), and the read-only `measure` (bounding box, scroll/client sizes, overflow and computed `properties` → the step's `measurements`). Selectors accept CSS or Playwright engines (`#email`, `text=Submit`, `role=button[name="Save"]`). `fill`/`select` use `text`; `press` uses `key`. A step's `viewport` resizes the page mid-flow.
+Each step's `actions` run in order. Supported action `type`s: `click`, `fill`, `select`, `check`, `uncheck`, `hover`, `press`, `waitFor`, `scroll` (into view, or by `x`/`y`), `wait` (`ms`), the read-only `measure` (bounding box, scroll/client sizes, overflow and computed `properties` → the step's `measurements`), `drag` and `upload` (below). Selectors accept CSS or Playwright engines (`#email`, `text=Submit`, `role=button[name="Save"]`). `fill`/`select` use `text`; `press` uses `key`. A step's `viewport` resizes the page mid-flow.
+
+**`drag`** — `{ "type": "drag", "selector": "#chip-3", "toSelector": "#chip-1" }` drops on the target's centre; add `"to": {"x", "y"}` to drop at that offset from the target's top-left, or give only `"to"` to drag by an offset from the source's centre (`{ "type": "drag", "selector": "#thumb", "to": {"x": 120, "y": 0} }` scrubs a slider). It is real pointer input — press, move in `steps` (default 12), release — so it works for pointer-driven widgets (sliders, sortable lists) **and** native HTML5 drag-and-drop (`draggable` + `dragstart`/`drop` with `dataTransfer`). The source is scrolled into view; a drop point outside the viewport is an error, not a silent miss. `within` scopes the source.
+
+**`upload`** — `{ "type": "upload", "selector": "#photo" }` sets files on an `<input type="file">` (hidden inputs behind a styled label work), or, when the selector is any other element, clicks it and answers the **file chooser** it opens (apps that build the input on the fly, e.g. an "Upload video" button). `"files": ["a.png", "/abs/b.mp4"]` (relative paths resolve against the workspace root; several only on a `multiple` input). Without `files` a bundled fixture is picked by the input's `accept`, trying its tokens in order: a 64×48 JPEG (`image/*`, `image/jpeg`, `.jpg`), PNG (`image/png`, `.png`) or a 1-second H.264 MP4 (`video/*`, `video/mp4`, `.mp4`) — all decodable by the browser. Anything else (`.csv`, `.pdf`, `video/quicktime` only, …) needs explicit `files`. `performed` names the files set and how.
 
 **Visible matches are preferred automatically.** Responsive layouts often render the same control twice (a desktop and a hidden mobile variant); actions and `waitFor` target the first *visible* match of the selector, so hidden duplicates never pin a click or wait until timeout, and no `:visible` suffix is needed. If every match stays hidden, the timeout error says so (`N match(es) but none visible`) instead of surfacing a generic retry log. This applies to all action runners: `capture_flow` steps, `verify_data_flow` actions, and the `browser.login` pre-step.
 
@@ -296,6 +301,50 @@ Each step's `actions` run in order. Supported action `type`s: `click`, `fill`, `
 ```
 
 Filled values are reported by length, not content, so passwords/tokens don't leak into the transcript.
+
+### Stubbing the API (`mockApi`)
+
+A screen built before its server part exists can't be seen with data: the endpoint 404s, or a new field isn't served yet. `mockApi` on `check_page`, `render_component`, `verify_data_flow` and `capture_flow` (whole flow) answers matching requests with a stub for **that call only**; everything else reaches the real API. The route is installed after login (login traffic is real) and removed when the call ends, **even if it fails** — the shared browser is never left stubbed.
+
+```jsonc
+"mockApi": [
+  { "path": "/orders/catalog", "json": { "data": [{ "id": 1, "irons": ["5i", "6i"] }] } },
+  { "method": "POST", "path": "/orders/*", "status": 201, "json": { "id": 9 } },
+  { "path": "**/reports/summary", "query": { "range": "30d" }, "status": 500, "body": "boom" }
+]
+```
+
+| Field | What it does |
+|-------|-------------|
+| `path` | Required. The pathname as `apiCalls` shows it, on any origin, case-insensitive, trailing slash ignored. Exact (`/orders/catalog`), glob (`*` = one segment, `**` = any depth — `**/orders/catalog` also matches `/api/v1/orders/catalog`), or regex with a `re:` prefix (`"re:^/orders/\\d+$"` as a JSON string). A full URL also pins the origin; a `?a=b` suffix becomes `query`. |
+| `method` | Default `GET`; `"*"` matches any. |
+| `query` | Params that must be present with these values (others may be too). |
+| `status` | Default 200. |
+| `json` / `body` | JSON body (content-type `application/json`) or raw string (`text/plain` unless `headers` sets one). One or the other. |
+| `headers` | Extra response headers. |
+
+Only the requests `apiCalls` counts are matched (xhr/fetch, or a URL under `/api/`), so a stub never intercepts the page, its scripts or images. The result carries `mockApi: { mocks: [{method, path, status, hits}], unmatched?, warning? }`; stubbed calls carry **`mocked: true`** in `apiCalls` (on `check_page` / `render_component`, `apiCalls` is added to the result whenever `mockApi` is passed) and in `verify_data_flow`'s matched/unexpected lists, with the same body summary (`rowCount`, …) as a real response. A stub **no request matched** is listed under `unmatched` with `nearMisses` — observed calls that look like what it meant (same path with another method or query, or the same last segment under another prefix). Bad stubs fail before the browser starts, naming every problem; an unknown key gets a did-you-mean (`url` → `path`, `response` → `json`). Arguments `mocks` / `stubs` are accepted as aliases.
+
+Cross-origin APIs work: while any stub is installed, Playwright answers every CORS preflight itself and adds the allow-origin headers to a stubbed response. Two side effects for that call only: the HTTP cache is off, and a real CORS misconfiguration on the live API won't show (its preflights are answered too).
+
+### Who the browser is signed in as (`signedInAs`)
+
+Every runtime result (`check_page`, `render_component`, `verify_data_flow`, `capture_flow`, `inspect_rendered_page`) carries `signedInAs`, and `server_info` carries the same per profile under `login.account` / `login.profiles[].account`:
+
+```jsonc
+"signedInAs": {
+  "profile": "default", "loginConfigured": true, "loggedIn": true,
+  "loginEmail": "qa@acme.dev", "loginEmailFrom": "env APP_EMAIL",
+  "app": { "email": "qa@acme.dev", "id": "u-1", "name": "Q A", "roles": ["admin"], "source": "sessionStorage.app_user" },
+  "impersonating": { "active": true, "phase": "active", "as": { "email": "coach@acme.dev", "roles": ["coach"], "…": "…" }, "original": { "…": "…" }, "source": "sessionStorage.app_impersonation" },
+  "summary": "login: qa@acme.dev (env APP_EMAIL); app user: qa@acme.dev [admin]; impersonating: coach@acme.dev [coach]"
+}
+```
+
+- **`loginEmail`** is resolved from the login flow's `fill` actions and the env vars they reference — env vars that may exist only in this server's process. Only a value that is an email is reported; a fill whose selector looks like a secret (`password`, `otp`, `token`, …) or whose env var does (`*PASSWORD*`, `*SECRET*`, `*TOKEN*`, …) is never read. An unset env var is named (`env APP_EMAIL — not set in atlas-ui's environment`).
+- **`app`** is the app's own signed-in user, read from `localStorage` / `sessionStorage` on the page the call ended on: user-shaped JSON objects (email and/or roles, plus id/name) and JWT claims, ranked by the key they live under, reduced to email / id / name / roles — tokens never appear. No storage key names are configured or hard-coded; `source` names the key it came from and `alsoFound` lists other distinct users found, so a wrong guess is visible. `mismatch: true` when it differs from `loginEmail`.
+- **`impersonating`** reads any storage key naming impersonation: the stored phase/flag decides `active`, the user inside it is `as` and one under an `original`/`admin` path is `original`. `false` when a user was found and no such key exists.
+- On a public call (`public: true`) `loginSkipped` is set — the context may still hold an earlier session, and `app` says whether it does. When the page ended on another origin, `appUnread` says so.
 
 ### Browser configuration
 
