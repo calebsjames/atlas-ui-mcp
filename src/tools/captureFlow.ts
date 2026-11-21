@@ -1,5 +1,5 @@
 import type { BrowserSession } from "../browser/session.js";
-import type { FlowAction, ResolvedFlowStep } from "../browser/types.js";
+import type { ApiMock, FlowAction, ResolvedFlowStep } from "../browser/types.js";
 import type { RouteAnalyzer } from "../analyzer/routeAnalyzer.js";
 import type { ComponentScanner } from "../scanner/componentScanner.js";
 import type { CacheManager } from "../cache/cacheManager.js";
@@ -48,6 +48,7 @@ export async function captureFlow(
     waitUntil?: WaitUntil;
     loginAs?: string;
     viewport?: { width: number; height: number };
+    mockApi?: ApiMock[];
   },
   session: BrowserSession,
   routeAnalyzer: RouteAnalyzer,
@@ -145,13 +146,15 @@ export async function captureFlow(
     });
   }
 
-  const stepResults = await session.runFlow(resolved, {
+  const flow = await session.runFlowDetailed(resolved, {
     settleMs: args.settleMs,
     requireAuth: !args.public,
     waitUntil: args.waitUntil,
     loginAs: args.loginAs,
     viewport: args.viewport,
+    mockApi: args.mockApi,
   });
+  const stepResults = flow.steps;
 
   const content: McpContentResult["content"] = [];
   const summaries = stepResults.map((r, i) => ({
@@ -183,6 +186,8 @@ export async function captureFlow(
         passed: allClean && !stoppedEarly,
         stoppedEarly,
         stepsCompleted: `${completed}/${resolved.length}`,
+        ...(flow.mockApi ? { mockApi: flow.mockApi } : {}),
+        signedInAs: flow.signedInAs,
         steps: summaries,
       },
       null,

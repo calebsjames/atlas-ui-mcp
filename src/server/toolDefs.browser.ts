@@ -9,9 +9,11 @@ const ACTION_ITEM_SCHEMA = {
   properties: {
     type: {
       type: "string",
-      enum: ["click", "fill", "press", "select", "check", "uncheck", "hover", "waitFor", "scroll", "wait", "measure"],
+      enum: ["click", "fill", "press", "select", "check", "uncheck", "hover", "waitFor", "scroll", "wait", "measure", "drag", "upload"],
       description:
-        "Interaction kind. `scroll`: with selector, into view (or by x/y inside that element); without, the page by x/y (neither = to the bottom). `wait`: pause `ms`. `measure` (read-only): bounding box, scroll/client sizes, overflow and computed `properties` of up to 10 matches of `selector`, plus page scroll/overflow — returned in the step's `measurements`.",
+        "Interaction kind. `scroll`: with selector, into view (or by x/y inside that element); without, the page by x/y (neither = to the bottom). `wait`: pause `ms`. `measure` (read-only): bounding box, scroll/client sizes, overflow and computed `properties` of up to 10 matches of `selector`, plus page scroll/overflow — returned in the step's `measurements`. " +
+        "`drag`: real pointer drag (press, move in `steps`, release) from `selector` onto `toSelector` (its centre, or `to` as an offset from its top-left) or by `to` {x,y} from the source's centre — works for pointer-driven widgets (sliders, sortable lists) and native HTML5 drag-and-drop. " +
+        "`upload`: set `files` on an <input type=file> (hidden inputs work), or click any other element and answer the file chooser it opens; without `files`, a bundled tiny fixture is picked by the input's `accept` (JPEG, PNG or MP4).",
     },
     selector: {
       type: "string",
@@ -35,8 +37,48 @@ const ACTION_ITEM_SCHEMA = {
       items: { type: "string" },
       description: 'measure: computed-style properties to read (default display, position, overflow-x/y, z-index, font-size), e.g. ["padding-left", "grid-template-columns"].',
     },
+    toSelector: { type: "string", description: "drag: the element to drop onto (its centre, or `to` as an offset from its top-left corner)." },
+    to: {
+      type: "object",
+      description: "drag: with toSelector, the drop point inside the target (from its top-left); without, the offset from the source's centre, e.g. {\"x\": 120, \"y\": 0}.",
+      properties: { x: { type: "number" }, y: { type: "number" } },
+      required: ["x", "y"],
+    },
+    steps: { type: "number", description: "drag: pointer-move steps between pick-up and drop (default 12)." },
+    files: {
+      type: "array",
+      items: { type: "string" },
+      description: "upload: file paths (absolute, or relative to the workspace root). Omit to use a bundled fixture chosen by the input's `accept` (JPEG, PNG, MP4).",
+    },
   },
   required: ["type"],
+};
+
+// Per-call API stubs, shared by check_page, render_component, verify_data_flow and capture_flow.
+const MOCK_API_SCHEMA = {
+  type: "array",
+  description:
+    "API stubs for THIS call only. A page request (xhr/fetch, or a URL under /api/ — the same calls `apiCalls` lists) that matches a stub is " +
+    "answered with it; everything else reaches the real API. The stubs are removed when the call ends, even on error. Use it to see a screen " +
+    "whose endpoint or field the server doesn't serve yet. Stubbed calls carry `mocked: true` in `apiCalls`; `mockApi.unmatched` lists any stub " +
+    "no request matched (with `nearMisses`: observed calls that look like what it meant). Cross-origin calls work (CORS is handled); while stubs are installed every CORS preflight is answered by the browser driver and the HTTP cache is off.",
+  items: {
+    type: "object",
+    properties: {
+      method: { type: "string", description: 'HTTP method (default "GET"); "*" matches any.' },
+      path: {
+        type: "string",
+        description:
+          'URL pathname as `apiCalls` shows it, on any origin (case-insensitive, trailing slash ignored): exact "/orders/catalog"; glob "/orders/*" (one segment) or "**/orders/catalog" (any prefix, e.g. an API base path); regex "re:^/orders/\\d+$". A full URL also pins the origin; a "?a=b" suffix becomes `query`.',
+      },
+      query: { type: "object", description: 'Query params that must be present with these values, e.g. {"status": "open"}.' },
+      status: { type: "number", description: "Response status (default 200)." },
+      json: { description: "JSON response body (any JSON value; content-type application/json)." },
+      body: { type: "string", description: "Raw response body instead of json (content-type text/plain unless headers set one)." },
+      headers: { type: "object", description: "Extra response headers." },
+    },
+    required: ["path"],
+  },
 };
 
 // Per-call viewport and login identity, shared by every runtime tool.
@@ -117,6 +159,7 @@ export const BROWSER_TOOLS = [
         },
         viewport: VIEWPORT_SCHEMA,
         loginAs: LOGIN_AS_SCHEMA,
+        mockApi: MOCK_API_SCHEMA,
         measure: MEASURE_SCHEMA,
       },
       required: [],
@@ -125,7 +168,7 @@ export const BROWSER_TOOLS = [
   {
     name: "check_page",
     description:
-      "Navigate to any URL (absolute, or a path relative to the dev server) and return a screenshot plus runtime diagnostics: console errors, uncaught exceptions, and failed network calls. Optional per-call `viewport` (responsive checks), `loginAs` (another role from browser.profiles) and `measure` (read-only boxes / overflow / computed styles for selectors). The 'did my change break anything' workhorse — call it after editing to confirm the page still renders clean. Requires the dev server to be running.",
+      "Navigate to any URL (absolute, or a path relative to the dev server) and return a screenshot plus runtime diagnostics: console errors, uncaught exceptions, and failed network calls. Optional per-call `viewport` (responsive checks), `loginAs` (another role from browser.profiles), `measure` (read-only boxes / overflow / computed styles for selectors) and `mockApi` (stub API responses for this call). `signedInAs` reports which account the browser used (login email + the app's own user, roles, impersonation). The 'did my change break anything' workhorse — call it after editing to confirm the page still renders clean. Requires the dev server to be running.",
     inputSchema: {
       type: "object",
       properties: {
@@ -150,6 +193,7 @@ export const BROWSER_TOOLS = [
         },
         viewport: VIEWPORT_SCHEMA,
         loginAs: LOGIN_AS_SCHEMA,
+        mockApi: MOCK_API_SCHEMA,
         measure: MEASURE_SCHEMA,
       },
       required: ["url"],
@@ -195,6 +239,7 @@ export const BROWSER_TOOLS = [
         },
         viewport: VIEWPORT_SCHEMA,
         loginAs: LOGIN_AS_SCHEMA,
+        mockApi: MOCK_API_SCHEMA,
       },
       required: ["name"],
     },
@@ -202,7 +247,7 @@ export const BROWSER_TOOLS = [
   {
     name: "capture_flow",
     description:
-      "Drive a multi-step user flow against a SINGLE persistent page and screenshot each step. Each step can navigate (component/route/url/section) and/or run interactions (click, fill, select, press, check, hover, waitFor, scroll, wait, and the read-only measure) — so you can log in, fill a form, submit, and verify the next screen as one flow. Each call opens a FRESH page (auth carries over; a previous call's open modal does not); `viewport` and `loginAs` (a browser.profiles role) apply to the whole flow, and a step's `viewport` resizes mid-flow. State (cookies, form values, SPA route) carries across steps. Each step reports the API calls it triggered ({method, path, status}) so you can confirm a click actually fired its mutation. Aggregates diagnostics into a single pass/fail; on a failed action it screenshots the broken state and stops. Requires the dev server to be running.",
+      "Drive a multi-step user flow against a SINGLE persistent page and screenshot each step. Each step can navigate (component/route/url/section) and/or run interactions (click, fill, select, press, check, hover, waitFor, scroll, wait, and the read-only measure) — so you can log in, fill a form, submit, and verify the next screen as one flow. Each call opens a FRESH page (auth carries over; a previous call's open modal does not); `viewport` and `loginAs` (a browser.profiles role) apply to the whole flow, and a step's `viewport` resizes mid-flow. State (cookies, form values, SPA route) carries across steps. Each step reports the API calls it triggered ({method, path, status}) so you can confirm a click actually fired its mutation. Actions include `drag` (real pointer drag: sliders, sortable lists, HTML5 drag-and-drop) and `upload` (file inputs and file-chooser buttons; a bundled JPEG/PNG/MP4 when no `files` are given). `mockApi` stubs API responses for the whole flow (e.g. an endpoint the server doesn't have yet). The result's `signedInAs` says which account the browser used (login email + the app's own user, roles, impersonation). Aggregates diagnostics into a single pass/fail; on a failed action it screenshots the broken state and stops. Requires the dev server to be running.",
     inputSchema: {
       type: "object",
       properties: {
@@ -248,6 +293,7 @@ export const BROWSER_TOOLS = [
         },
         viewport: VIEWPORT_SCHEMA,
         loginAs: LOGIN_AS_SCHEMA,
+        mockApi: MOCK_API_SCHEMA,
       },
       required: ["steps"],
     },

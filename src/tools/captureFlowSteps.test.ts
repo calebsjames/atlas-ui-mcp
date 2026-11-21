@@ -48,15 +48,17 @@ async function harness() {
   } as unknown as RouteAnalyzer;
 
   const seen: any[] = [];
+  const runFlow = async (steps: any[]) => {
+    seen.push(...steps);
+    return steps.map((s) => ({
+      label: s.label, url: s.url, title: "", performed: [], consoleErrors: [], pageErrors: [],
+      failedRequests: [], requestCount: 0, apiCalls: [], clean: true,
+    }));
+  };
   const session = {
     baseUrl: "http://x",
-    runFlow: async (steps: any[]) => {
-      seen.push(...steps);
-      return steps.map((s) => ({
-        label: s.label, url: s.url, title: "", performed: [], consoleErrors: [], pageErrors: [],
-        failedRequests: [], requestCount: 0, apiCalls: [], clean: true,
-      }));
-    },
+    runFlow,
+    runFlowDetailed: async (steps: any[]) => ({ steps: await runFlow(steps), signedInAs: { profile: "default", summary: "" } }),
   } as unknown as BrowserSession;
 
   const run = (steps: any[]) => captureFlow({ steps }, session, routeAnalyzer, scanner, cache, {});
