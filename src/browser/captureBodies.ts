@@ -91,16 +91,13 @@ export class BodyCapture {
   private captured = 0;
   /** The last body kept per method + URL, so an identical repeat (a poll) is not charged twice. */
   private readonly last = new Map<string, { raw: string; body: CapturedBody }>();
-  /** Set while the session signs in again mid-call: login traffic is never captured. */
-  paused = false;
-
   constructor(private readonly patterns: CompiledBodyPattern[]) {
     this.hits = patterns.map(() => 0);
   }
 
   /** Does some pattern ask for this request's response body? (API calls only, like `mockApi`.) */
   wants(entry: { url: string; method: string; resourceType: string }): boolean {
-    if (this.paused || !isApiRequest(entry)) return false;
+    if (!isApiRequest(entry)) return false;
     let url: URL;
     try {
       url = new URL(entry.url);

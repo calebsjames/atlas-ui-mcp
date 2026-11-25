@@ -191,6 +191,7 @@ export async function captureFlow(
         ...(flow.mockApi ? { mockApi: flow.mockApi } : {}),
         ...(flow.captureBodies ? { captureBodies: flow.captureBodies } : {}),
         signedInAs: flow.signedInAs,
+        ...(flow.reloggedIn ? { reloggedIn: true, reloginReason: flow.reloginReason } : {}),
         steps: summaries,
       },
       null,

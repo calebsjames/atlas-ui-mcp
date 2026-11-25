@@ -57,6 +57,8 @@ export function diagnostics(capture: CaptureResult) {
     ...(capture.captureBodies ? { captureBodies: capture.captureBodies } : {}),
     ...(capture.mockApi || capture.captureBodies ? { apiCalls: toApiCalls(capture.requests) } : {}),
     ...(capture.signedInAs ? { signedInAs: capture.signedInAs } : {}),
+    // The session had expired: this call signed in again and retried once.
+    ...(capture.reloggedIn ? { reloggedIn: true, reloginReason: capture.reloginReason } : {}),
     screenshotPath: capture.screenshotPath,
   };
 }

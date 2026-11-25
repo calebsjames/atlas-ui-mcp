@@ -1,4 +1,4 @@
-import type { BrowserSession } from "../browser/session.js";
+import { SignedOutError, type BrowserSession } from "../browser/session.js";
 import type { RouteAnalyzer } from "../analyzer/routeAnalyzer.js";
 import type { ComponentScanner } from "../scanner/componentScanner.js";
 import type { CacheManager } from "../cache/cacheManager.js";
@@ -76,7 +76,9 @@ export async function inspectRenderedPage(
   const rendered = await session.withPage(async (page) => {
     try {
       await session.navigate(page, url);
-    } catch {
+    } catch (err) {
+      // Signed out: the session signs in again and re-runs this (or reports it).
+      if (err instanceof SignedOutError) throw err;
       // A slow/failed nav still leaves something to inspect; press on.
     }
     // Reveal a click-switched section before inspecting what's mounted.
@@ -184,12 +186,15 @@ export async function inspectRenderedPage(
     unmatched: string[];
     note?: string;
     signedInAs: ReturnType<BrowserSession["signedInAs"]>;
+    reloggedIn?: true;
+    reloginReason?: string;
   } = {
     url,
     framework: rendered.framework,
     mounted,
     unmatched,
     signedInAs: session.signedInAs(args.loginAs),
+    ...session.reloginInfo(args.loginAs),
   };
 
   if (rendered.framework === "unknown" || Object.keys(rendered.counts).length === 0) {

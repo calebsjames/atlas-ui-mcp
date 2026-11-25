@@ -97,6 +97,10 @@ export interface CaptureResult {
   captureBodies?: BodyCaptureReport;
   /** Who the browser is signed in as for this call (login account + the app's own user). */
   signedInAs?: SignedInAs;
+  /** Set when the session was found signed out and this call signed in again before its (retried) navigation. */
+  reloggedIn?: true;
+  /** What showed the session was signed out, when `reloggedIn`. */
+  reloginReason?: string;
   /** True if nothing went wrong: no page errors, console errors, or failed requests. */
   clean: boolean;
   durationMs: number;
