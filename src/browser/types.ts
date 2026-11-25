@@ -197,7 +197,10 @@ export interface FlowAction {
    * contains BOTH this text AND a `selector` match — "the Open Kit button in
    * the row containing RK-003" without hand-writing container CSS. When the
    * scoped target is disabled, the action still fails loudly (a disabled
-   * control is signal, not an obstacle to route around).
+   * control is signal, not an obstacle to route around). `selector` may use
+   * Playwright syntax here too. `within` itself is text; written with an
+   * engine prefix other than `text=` (`css=tr.selected`, `role=row[...]`) or a
+   * `>>` chain it is a container selector instead.
    */
   within?: string;
   /** Value for `fill` / `select`. */
