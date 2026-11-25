@@ -430,17 +430,44 @@ export function describeAction(a: FlowAction, detail?: string): string {
 export function toApiCalls(requests: NetworkEntry[]): ApiCall[] {
   const MAX_PER_SLICE = 30;
   const seen = new Set<string>();
+  // Calls whose body was asked for (`captureBodies`) are kept apart from the
+  // dedupe-and-cap above: they dedupe by method + path + query, a repeat with
+  // a DIFFERENT body is kept too, and they never count against (or get cut
+  // by) the 30-call cap — a requested body is not lost to a chatty step.
+  const lastBody = new Map<string, unknown>();
+  let plain = 0;
+  let withBody = 0;
   const out: ApiCall[] = [];
   for (const r of requests) {
     if (!isApiRequest(r)) continue;
     const p = toPathname(r.url);
     const key = r.method + " " + p;
-    if (seen.has(key)) continue;
+    const call = { method: r.method, path: p, status: r.status, ...bodyFields(r), ...(r.mocked ? { mocked: true } : {}) };
+    if (r.responseBody) {
+      const query = toSearch(r.url);
+      const bodyKey = key + query;
+      const prev = lastBody.get(bodyKey);
+      if (prev === r.responseBody || (prev && r.responseBody.omitted) || withBody >= MAX_PER_SLICE) continue;
+      lastBody.set(bodyKey, r.responseBody);
+      withBody++;
+      out.push({ ...call, ...(query ? { query } : {}), responseBody: r.responseBody });
+      continue;
+    }
+    if (seen.has(key) || plain >= MAX_PER_SLICE) continue;
     seen.add(key);
-    out.push({ method: r.method, path: p, status: r.status, ...bodyFields(r), ...(r.mocked ? { mocked: true } : {}) });
-    if (out.length >= MAX_PER_SLICE) break;
+    plain++;
+    out.push(call);
   }
   return out;
+}
+
+/** URL → its query string including "?", or "" when there is none. */
+function toSearch(url: string): string {
+  try {
+    return new URL(url).search;
+  } catch {
+    return "";
+  }
 }
 
 /** The response-size / row-count fields of an entry, each omitted when absent. */

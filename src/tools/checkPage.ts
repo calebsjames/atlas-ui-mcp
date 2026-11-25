@@ -20,6 +20,7 @@ export async function checkPage(
     viewport?: { width: number; height: number };
     measure?: string[];
     mockApi?: ApiMock[];
+    captureBodies?: string[];
   },
   session: BrowserSession
 ): Promise<McpContentResult> {
@@ -35,6 +36,7 @@ export async function checkPage(
     viewport: args.viewport,
     measure: args.measure,
     mockApi: args.mockApi,
+    captureBodies: args.captureBodies,
   });
 
   return captureResponse({ url, ...diagnostics(capture) }, capture);

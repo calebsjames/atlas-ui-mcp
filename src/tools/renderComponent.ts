@@ -26,6 +26,7 @@ export async function renderComponent(
     viewport?: { width: number; height: number };
     measure?: string[];
     mockApi?: ApiMock[];
+    captureBodies?: string[];
   },
   session: BrowserSession,
   routeAnalyzer: RouteAnalyzer,
@@ -57,6 +58,7 @@ export async function renderComponent(
     viewport: args.viewport,
     measure: args.measure,
     mockApi: args.mockApi,
+    captureBodies: args.captureBodies,
     // Reveal a click-switched section (if any) after load, before the screenshot.
     actions: resolved.revealActions,
   });

@@ -52,7 +52,10 @@ export function diagnostics(capture: CaptureResult) {
     ...(capture.viewport ? { viewport: capture.viewport } : {}),
     // With stubs in play, show which calls were stubbed (`mocked: true`) next
     // to the real ones, and what each stub matched.
-    ...(capture.mockApi ? { mockApi: capture.mockApi, apiCalls: toApiCalls(capture.requests) } : {}),
+    ...(capture.mockApi ? { mockApi: capture.mockApi } : {}),
+    // Asked-for response bodies ride on the same list (`responseBody`).
+    ...(capture.captureBodies ? { captureBodies: capture.captureBodies } : {}),
+    ...(capture.mockApi || capture.captureBodies ? { apiCalls: toApiCalls(capture.requests) } : {}),
     ...(capture.signedInAs ? { signedInAs: capture.signedInAs } : {}),
     screenshotPath: capture.screenshotPath,
   };

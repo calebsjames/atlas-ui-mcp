@@ -4,6 +4,7 @@ import type { Browser, BrowserContext, Page } from "playwright";
 import type { BrowserConfig, BrowserLoginConfig } from "../types.js";
 import type {
   ApiMock,
+  BodyCaptureReport,
   CaptureOptions,
   CaptureResult,
   ConsoleEntry,
@@ -17,6 +18,7 @@ import type {
 } from "./types.js";
 import { describeAction, runAction, toApiCalls, type ActionContext } from "./actions.js";
 import { compileMocks, MockRouter } from "./mockApi.js";
+import { BodyCapture, compileBodyPatterns, MAX_BODY_READ_BYTES } from "./captureBodies.js";
 import { describeUser, extractIdentity, loginAccount, readStorageEntries, type ExtractedIdentity } from "./identity.js";
 import { isApiRequest, summarizeJsonBody } from "./network.js";
 import {
@@ -52,6 +54,8 @@ interface DiagBuffers {
   byRequest: WeakMap<object, NetworkEntry>;
   /** Requests a `mockApi` stub fulfilled (in case the route fires before the request event). */
   mocked: WeakSet<object>;
+  /** The running call's `captureBodies`, when it asked for response bodies; null between calls. */
+  bodyCapture: BodyCapture | null;
 }
 
 /** What the app's storage said about the signed-in user, and when/where it was read. */
@@ -87,6 +91,23 @@ interface Profile {
   lastUrl: string | null;
   /** The app's signed-in user as last read from this profile's storage (for server_info). */
   identity: ObservedIdentity | null;
+}
+
+/** Options of a flow (`runFlow` / `runFlowDetailed`). */
+export type FlowOptions = {
+  settleMs?: number;
+  waitUntil?: WaitUntil;
+  mockApi?: ApiMock[];
+  /** Opt-in response bodies for the whole flow (see CaptureOptions.captureBodies). */
+  captureBodies?: string[];
+} & PageOptions;
+
+/** What a flow returns beyond its steps. */
+export interface FlowResult {
+  steps: FlowStepResult[];
+  signedInAs: SignedInAs;
+  mockApi?: MockReport;
+  captureBodies?: BodyCaptureReport;
 }
 
 /** Per-call page options shared by every runtime entry point. */
@@ -542,17 +563,20 @@ export class BrowserSession {
   async capture(url: string, opts: CaptureOptions = {}): Promise<CaptureResult> {
     // Validate stubs before any browser work, so a typo fails fast.
     const router = mockRouter(opts.mockApi, this.workspaceRoot);
+    const bodies = bodyCapture(opts.captureBodies);
     const { page, diag, profile } = await this.ensurePage({
       requireAuth: opts.requireAuth !== false,
       loginAs: opts.loginAs,
       viewport: opts.viewport,
     });
-    // Stubs go on AFTER login (login traffic is real) and come off when the
-    // call ends, even if it throws.
+    // Stubs and body capture go on AFTER login (login traffic is real, and is
+    // never captured) and come off when the call ends, even if it throws.
     try {
       if (router) await router.install(page, (req) => this.markMocked(diag, req));
-      return await this.captureOnPage(page, diag, profile, url, opts, router);
+      diag.bodyCapture = bodies ?? null;
+      return await this.captureOnPage(page, diag, profile, url, opts, router, bodies);
     } finally {
+      diag.bodyCapture = null;
       await router?.uninstall();
     }
   }
@@ -563,7 +587,8 @@ export class BrowserSession {
     profile: Profile,
     url: string,
     opts: CaptureOptions,
-    router: MockRouter | undefined
+    router: MockRouter | undefined,
+    bodies: BodyCapture | undefined
   ): Promise<CaptureResult> {
     // Record buffer positions so we report only THIS call's diagnostics, not
     // everything accumulated on the shared page since login.
@@ -648,6 +673,7 @@ export class BrowserSession {
       ...(measurements.length ? { measurements } : {}),
       ...(viewport ? { viewport } : {}),
       ...(router ? { mockApi: router.report(requests) } : {}),
+      ...(bodies ? { captureBodies: bodies.report(requests) } : {}),
       signedInAs,
       clean:
         consoleErrors.length === 0 &&
@@ -753,7 +779,7 @@ export class BrowserSession {
    */
   async runFlow(
     steps: ResolvedFlowStep[],
-    opts: { settleMs?: number; waitUntil?: WaitUntil; mockApi?: ApiMock[] } & PageOptions = {}
+    opts: FlowOptions = {}
   ): Promise<FlowStepResult[]> {
     return (await this.runFlowDetailed(steps, opts)).steps;
   }
@@ -765,9 +791,10 @@ export class BrowserSession {
    */
   async runFlowDetailed(
     steps: ResolvedFlowStep[],
-    opts: { settleMs?: number; waitUntil?: WaitUntil; mockApi?: ApiMock[] } & PageOptions = {}
-  ): Promise<{ steps: FlowStepResult[]; signedInAs: SignedInAs; mockApi?: MockReport }> {
+    opts: FlowOptions = {}
+  ): Promise<FlowResult> {
     const router = mockRouter(opts.mockApi, this.workspaceRoot);
+    const bodies = bodyCapture(opts.captureBodies);
     // One fresh page for the whole flow, logged in as the requested profile
     // (requireAuth:false for a public flow). Steps share it.
     const { page, diag, profile } = await this.ensurePage({
@@ -778,6 +805,7 @@ export class BrowserSession {
     const flowMark = this.markDiag(diag);
     try {
       if (router) await router.install(page, (req) => this.markMocked(diag, req));
+      diag.bodyCapture = bodies ?? null;
       const results = await this.runFlowSteps(page, diag, profile, steps, opts);
       await this.settlePending(diag);
       const signedInAs = await this.endOfCallIdentity(profile, page, opts.requireAuth === false);
@@ -785,8 +813,10 @@ export class BrowserSession {
         steps: results,
         signedInAs,
         ...(router ? { mockApi: router.report(diag.requests.slice(flowMark.rq)) } : {}),
+        ...(bodies ? { captureBodies: bodies.report(diag.requests.slice(flowMark.rq)) } : {}),
       };
     } finally {
+      diag.bodyCapture = null;
       await router?.uninstall();
     }
   }
@@ -947,6 +977,7 @@ export class BrowserSession {
       inflight: new Map(),
       byRequest: new WeakMap(),
       mocked: new WeakSet(),
+      bodyCapture: null,
     };
     this.diagByPage.set(page, d);
     const idleIgnore = this.config.idleIgnore ?? [];
@@ -1000,23 +1031,38 @@ export class BrowserSession {
       // cap. Reading a body is async and can't be awaited from an event handler,
       // so we park the promise and settle it before a call slices diagnostics.
       const contentType = headers["content-type"] || "";
-      if (
+      const summarize =
         isApiRequest(entry) &&
         /\bjson\b/i.test(contentType) &&
-        (entry.bytes == null || entry.bytes <= MAX_BODY_SUMMARY_BYTES)
-      ) {
+        (entry.bytes == null || entry.bytes <= MAX_BODY_SUMMARY_BYTES);
+      // The body itself is read only when THIS call's `captureBodies` names it.
+      const capture = d.bodyCapture;
+      let wanted = !!capture && capture.wants(entry);
+      if (wanted && entry.bytes != null && entry.bytes > MAX_BODY_READ_BYTES) {
+        capture!.omit(entry, `the response is ${entry.bytes} bytes — over the ${MAX_BODY_READ_BYTES}-byte read limit`);
+        wanted = false;
+      }
+      if (summarize || wanted) {
         const p = res
           .body()
           .then((buf) => {
             if (entry.bytes == null) entry.bytes = buf.length;
-            if (buf.length <= MAX_BODY_SUMMARY_BYTES) {
+            if (summarize && buf.length <= MAX_BODY_SUMMARY_BYTES) {
               const summary = summarizeJsonBody(buf);
               if (summary) Object.assign(entry, summary);
+            }
+            if (wanted) {
+              if (buf.length > MAX_BODY_READ_BYTES) {
+                capture!.omit(entry, `the response is ${buf.length} bytes — over the ${MAX_BODY_READ_BYTES}-byte read limit`);
+              } else {
+                capture!.record(entry, buf, contentType);
+              }
             }
           })
           .catch(() => {
             // No body (204/redirect/HEAD), or it was already consumed — the
             // header byte count (if any) still stands.
+            if (wanted) capture!.omit(entry, `no response body could be read${entry.status != null ? ` (status ${entry.status})` : ""}`);
           });
         d.pending.push(p);
       }
@@ -1063,6 +1109,12 @@ export class BrowserSession {
 function mockRouter(mockApi: unknown, baseDir: string): MockRouter | undefined {
   if (mockApi == null || (Array.isArray(mockApi) && mockApi.length === 0)) return undefined;
   return new MockRouter(compileMocks(mockApi, { baseDir }));
+}
+
+/** A body capture for `captureBodies`, validated up front; none for an absent or empty list. */
+function bodyCapture(patterns: unknown): BodyCapture | undefined {
+  if (patterns == null || (Array.isArray(patterns) && patterns.length === 0)) return undefined;
+  return new BodyCapture(compileBodyPatterns(patterns));
 }
 
 /** Replace `${ENV_VAR}` in an action's text with process.env values. */

@@ -131,7 +131,7 @@ export function compileMocks(raw: unknown, opts: { baseDir?: string } = {}): Com
     const headers = stringMap(mock.headers, `${where}.headers`, problems);
     const queryIn = stringMap(mock.query, `${where}.query`, problems, true);
 
-    let compiled: Omit<CompiledMock, "method" | "status" | "body" | "headers"> | undefined;
+    let compiled: CompiledPath | undefined;
     try {
       compiled = compilePath(mock.path.trim(), queryIn);
     } catch (err) {
@@ -256,11 +256,11 @@ function stringMap(v: unknown, where: string, problems: string[], allowScalars =
   return out;
 }
 
+/** A compiled URL pattern: what `mockApi` paths and `captureBodies` patterns share. */
+export type CompiledPath = Pick<CompiledMock, "path" | "origin" | "pathRe" | "query" | "lastSegment">;
+
 /** Parse `path` (exact / glob / "re:" / full URL, optional ?query) into matchers. */
-function compilePath(
-  raw: string,
-  queryIn: Record<string, string>
-): Omit<CompiledMock, "method" | "status" | "body" | "headers"> {
+export function compilePath(raw: string, queryIn: Record<string, string>): CompiledPath {
   const query = new Map(Object.entries(queryIn));
   if (raw.startsWith("re:")) {
     let pathRe: RegExp;
@@ -311,16 +311,16 @@ function compilePath(
   };
 }
 
-function pathMatches(m: CompiledMock, url: URL): boolean {
+export function pathMatches(m: Pick<CompiledMock, "origin" | "pathRe">, url: URL): boolean {
   if (m.origin && url.origin !== m.origin) return false;
   return m.pathRe.test(safeDecode(url.pathname));
 }
 
-function queryMatches(m: CompiledMock, url: URL): boolean {
+export function queryMatches(m: Pick<CompiledMock, "query">, url: URL): boolean {
   return m.query.every(([k, v]) => url.searchParams.get(k) === v);
 }
 
-function methodMatches(m: CompiledMock, method: string): boolean {
+export function methodMatches(m: Pick<CompiledMock, "method">, method: string): boolean {
   return m.method === "*" || m.method === method.toUpperCase();
 }
 
@@ -411,7 +411,7 @@ export class MockRouter {
 }
 
 /** Observed API calls that look like what an unmatched stub meant. */
-function nearMissesFor(m: CompiledMock, requests: NetworkEntry[]): string[] {
+export function nearMissesFor(m: CompiledPath & { method: string }, requests: NetworkEntry[]): string[] {
   const out = new Set<string>();
   for (const r of requests) {
     if (!isApiRequest(r) || r.mocked) continue;
