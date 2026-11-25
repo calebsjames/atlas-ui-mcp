@@ -541,7 +541,7 @@ export class BrowserSession {
    */
   async capture(url: string, opts: CaptureOptions = {}): Promise<CaptureResult> {
     // Validate stubs before any browser work, so a typo fails fast.
-    const router = mockRouter(opts.mockApi);
+    const router = mockRouter(opts.mockApi, this.workspaceRoot);
     const { page, diag, profile } = await this.ensurePage({
       requireAuth: opts.requireAuth !== false,
       loginAs: opts.loginAs,
@@ -767,7 +767,7 @@ export class BrowserSession {
     steps: ResolvedFlowStep[],
     opts: { settleMs?: number; waitUntil?: WaitUntil; mockApi?: ApiMock[] } & PageOptions = {}
   ): Promise<{ steps: FlowStepResult[]; signedInAs: SignedInAs; mockApi?: MockReport }> {
-    const router = mockRouter(opts.mockApi);
+    const router = mockRouter(opts.mockApi, this.workspaceRoot);
     // One fresh page for the whole flow, logged in as the requested profile
     // (requireAuth:false for a public flow). Steps share it.
     const { page, diag, profile } = await this.ensurePage({
@@ -1060,9 +1060,9 @@ export class BrowserSession {
  * A router for `mockApi`, validated up front; none for an absent or empty list.
  * Anything else that isn't a list of stubs throws (never silently ignored).
  */
-function mockRouter(mockApi: unknown): MockRouter | undefined {
+function mockRouter(mockApi: unknown, baseDir: string): MockRouter | undefined {
   if (mockApi == null || (Array.isArray(mockApi) && mockApi.length === 0)) return undefined;
-  return new MockRouter(compileMocks(mockApi));
+  return new MockRouter(compileMocks(mockApi, { baseDir }));
 }
 
 /** Replace `${ENV_VAR}` in an action's text with process.env values. */

@@ -116,15 +116,22 @@ export interface ApiMock {
   status?: number;
   /** JSON response body (sets content-type application/json). */
   json?: unknown;
+  /**
+   * JSON response body read from a file — relative to the workspace root, and
+   * refused if it resolves outside it. Parsed and validated before the call.
+   */
+  jsonFile?: string;
   /** Raw response body (content-type text/plain unless `headers` sets one). */
   body?: string;
+  /** Raw response body read from a file (same path rule; content-type by extension). */
+  bodyFile?: string;
   /** Extra response headers. */
   headers?: Record<string, string>;
 }
 
 /** What a call's stubs did: hits per stub, and any stub that matched nothing. */
 export interface MockReport {
-  mocks: Array<{ method: string; path: string; status: number; hits: number }>;
+  mocks: Array<{ method: string; path: string; status: number; hits: number; file?: string }>;
   /** Stubs no request matched, with observed API calls that look like near misses. */
   unmatched?: Array<{ method: string; path: string; nearMisses?: string[] }>;
   warning?: string;

@@ -10,12 +10,26 @@
  * only xhr/fetch requests (or URLs under `/api/`), compared by pathname on
  * any origin — so the path an agent reads in `apiCalls` is the path it mocks.
  */
+import fs from "fs";
+import path from "path";
 import type { Page, Request, Route } from "playwright";
 import type { ApiMock, MockReport, NetworkEntry } from "./types.js";
 import { isApiRequest } from "./network.js";
 import { escapeRegex } from "../util.js";
 
-const MOCK_KEYS = ["method", "path", "query", "status", "json", "body", "headers"] as const;
+const MOCK_KEYS = ["method", "path", "query", "status", "json", "jsonFile", "body", "bodyFile", "headers"] as const;
+/** The four ways to give a stub its response body — at most one per stub. */
+const BODY_KEYS = ["json", "jsonFile", "body", "bodyFile"] as const;
+/** A mock file larger than this is refused (it would be re-sent on every matching request). */
+const MAX_MOCK_FILE_BYTES = 5_000_000;
+/** content-type for a `bodyFile`, by extension (text/plain otherwise). */
+const BODY_FILE_TYPES: Record<string, string> = {
+  ".json": "application/json",
+  ".html": "text/html; charset=utf-8",
+  ".htm": "text/html; charset=utf-8",
+  ".xml": "application/xml",
+  ".csv": "text/csv; charset=utf-8",
+};
 /** Likely wrong names for a mock field → the field meant. */
 const KEY_ALIASES: Record<string, string> = {
   url: "path", pattern: "path", route: "path", endpoint: "path", pathname: "path",
@@ -25,6 +39,8 @@ const KEY_ALIASES: Record<string, string> = {
   params: "query", searchparams: "query", querystring: "query",
   verb: "method", httpmethod: "method",
   contenttype: "headers", responseheaders: "headers",
+  file: "jsonFile", filepath: "jsonFile", jsonpath: "jsonFile", jsonfilepath: "jsonFile", fixture: "jsonFile", fixturefile: "jsonFile",
+  bodypath: "bodyFile", bodyfilepath: "bodyFile", textfile: "bodyFile",
 };
 const METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "*"]);
 
@@ -41,6 +57,8 @@ export interface CompiledMock {
   query: Array<[string, string]>;
   body: string;
   headers: Record<string, string>;
+  /** The `jsonFile` / `bodyFile` the body was read from, as the caller wrote it. */
+  file?: string;
   /** Last literal path segment, for near-miss hints on an unmatched stub. */
   lastSegment?: string;
 }
@@ -48,8 +66,10 @@ export interface CompiledMock {
 /**
  * Validate and compile `mockApi`. Throws one message naming every problem —
  * an unknown key gets a did-you-mean — before any browser work starts.
+ * `baseDir` (the workspace root) is where `jsonFile` / `bodyFile` resolve,
+ * and the directory they must stay inside.
  */
-export function compileMocks(raw: unknown): CompiledMock[] {
+export function compileMocks(raw: unknown, opts: { baseDir?: string } = {}): CompiledMock[] {
   if (!Array.isArray(raw)) {
     throw new Error("mockApi must be an array of stubs, e.g. [{\"path\": \"/orders/catalog\", \"json\": [...]}].");
   }
@@ -79,11 +99,34 @@ export function compileMocks(raw: unknown): CompiledMock[] {
     if (typeof status !== "number" || !Number.isInteger(status) || status < 100 || status > 599) {
       problems.push(`${where}: status must be an integer HTTP status (100-599).`);
     }
-    if (mock.json !== undefined && mock.body !== undefined) {
+    const given = BODY_KEYS.filter((k) => mock[k] !== undefined);
+    if (given.length === 2 && given[0] === "json" && given[1] === "body") {
       problems.push(`${where}: give "json" or "body", not both.`);
+    } else if (given.length > 1) {
+      problems.push(`${where}: give one of "json", "jsonFile", "body" or "bodyFile", not ${given.map((k) => `"${k}"`).join(" and ")}.`);
     }
     if (mock.body !== undefined && typeof mock.body !== "string") {
       problems.push(`${where}: "body" must be a string (use "json" for an object).`);
+    }
+    // A body kept in a file, so a large payload is not pasted into every call.
+    let fileBody: string | undefined;
+    let fileType: string | undefined;
+    const fileKey = given.length === 1 && (given[0] === "jsonFile" || given[0] === "bodyFile") ? given[0] : undefined;
+    if (fileKey) {
+      const read = readMockFile(mock[fileKey], fileKey, opts.baseDir);
+      if ("problem" in read) {
+        problems.push(`${where}: ${read.problem}`);
+      } else if (fileKey === "jsonFile") {
+        try {
+          fileBody = JSON.stringify(JSON.parse(read.text));
+          fileType = "application/json";
+        } catch (err) {
+          problems.push(`${where}: "jsonFile" ${read.shown} is not valid JSON (${err instanceof Error ? err.message : String(err)}). Use "bodyFile" to serve a file as-is.`);
+        }
+      } else {
+        fileBody = read.text;
+        fileType = BODY_FILE_TYPES[path.extname(read.shown).toLowerCase()] ?? "text/plain; charset=utf-8";
+      }
     }
     const headers = stringMap(mock.headers, `${where}.headers`, problems);
     const queryIn = stringMap(mock.query, `${where}.query`, problems, true);
@@ -102,25 +145,86 @@ export function compileMocks(raw: unknown): CompiledMock[] {
       ...compiled,
       method: method === "ANY" ? "*" : method,
       status: typeof status === "number" ? status : 200,
-      body: hasJson ? JSON.stringify(mock.json) : typeof mock.body === "string" ? mock.body : "",
+      body: fileBody !== undefined ? fileBody : hasJson ? JSON.stringify(mock.json) : typeof mock.body === "string" ? mock.body : "",
       headers: {
-        ...(contentType ? {} : hasJson ? { "content-type": "application/json" } : mock.body !== undefined ? { "content-type": "text/plain; charset=utf-8" } : {}),
+        ...(contentType
+          ? {}
+          : fileType
+            ? { "content-type": fileType }
+            : hasJson
+              ? { "content-type": "application/json" }
+              : mock.body !== undefined
+                ? { "content-type": "text/plain; charset=utf-8" }
+                : {}),
         ...headers,
       },
+      ...(fileKey && typeof mock[fileKey] === "string" ? { file: mock[fileKey] as string } : {}),
     });
   });
   if (problems.length) {
     throw new Error(
-      `Invalid mockApi — ${problems.join(" ")} Each stub: {method?, path, query?, status?, json? | body?, headers?}.`
+      `Invalid mockApi — ${problems.join(" ")} Each stub: {method?, path, query?, status?, json? | jsonFile? | body? | bodyFile?, headers?}.`
     );
   }
   return out;
 }
 
+/**
+ * Read a stub's `jsonFile` / `bodyFile`. The path resolves against the
+ * workspace root and must stay inside it — lexically and after symlinks are
+ * followed — so a stub cannot serve an arbitrary file from the machine to the
+ * page. Returns the text, or the problem to report.
+ */
+function readMockFile(
+  file: unknown,
+  key: "jsonFile" | "bodyFile",
+  baseDir: string | undefined
+): { text: string; shown: string } | { problem: string } {
+  if (typeof file !== "string" || !file.trim()) {
+    return { problem: `"${key}" must be a file path (string), relative to the workspace root.` };
+  }
+  if (!baseDir) return { problem: `"${key}" needs a workspace root to resolve against, and none is known here.` };
+  const realOrSelf = (p: string) => {
+    try {
+      return fs.realpathSync(p);
+    } catch {
+      return path.resolve(p);
+    }
+  };
+  const root = realOrSelf(baseDir);
+  const inside = (p: string) => {
+    const rel = path.relative(root, p);
+    return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
+  };
+  const outside = `"${key}" ${JSON.stringify(file)} resolves outside the workspace root (${root}) — a mock file must be inside it. Copy it into the workspace (e.g. .atlas-ui/mocks/) or pass the body inline.`;
+  // Resolve against both spellings of the root, so an absolute path written
+  // through a symlinked root (macOS /tmp) is still recognised as inside.
+  const abs = path.resolve(root, file);
+  const lexical = inside(abs) ? abs : inside(realOrSelf(path.resolve(baseDir, file))) ? path.resolve(baseDir, file) : undefined;
+  if (!lexical) return { problem: outside };
+  let real: string;
+  try {
+    real = fs.realpathSync(lexical);
+  } catch {
+    return { problem: `"${key}" file not found: ${lexical} (relative paths resolve against the workspace root ${root}).` };
+  }
+  if (!inside(real)) return { problem: outside };
+  try {
+    const st = fs.statSync(real);
+    if (!st.isFile()) return { problem: `"${key}" ${JSON.stringify(file)} is not a file.` };
+    if (st.size > MAX_MOCK_FILE_BYTES) {
+      return { problem: `"${key}" ${JSON.stringify(file)} is ${st.size} bytes — over the ${MAX_MOCK_FILE_BYTES}-byte limit for a mock body.` };
+    }
+    return { text: fs.readFileSync(real, "utf-8").replace(/^\uFEFF/, ""), shown: file };
+  } catch (err) {
+    return { problem: `"${key}" ${JSON.stringify(file)} could not be read (${err instanceof Error ? err.message.split("\n")[0] : String(err)}).` };
+  }
+}
+
 function suggestKey(key: string): string | undefined {
   const k = key.toLowerCase().replace(/[-_]/g, "");
   if (KEY_ALIASES[k]) return KEY_ALIASES[k];
-  return MOCK_KEYS.find((c) => editDistance(k, c) <= 2);
+  return MOCK_KEYS.find((c) => editDistance(k, c.toLowerCase()) <= 2);
 }
 
 function editDistance(a: string, b: string): number {
@@ -284,7 +388,9 @@ export class MockRouter {
 
   /** Hits per stub; stubs that matched nothing, with near misses from `requests`. */
   report(requests: NetworkEntry[]): MockReport {
-    const mocks = this.mocks.map((m, i) => ({ method: m.method, path: m.path, status: m.status, hits: this.hits[i] }));
+    const mocks = this.mocks.map((m, i) => ({
+      method: m.method, path: m.path, status: m.status, hits: this.hits[i], ...(m.file ? { file: m.file } : {}),
+    }));
     const unmatched = this.mocks
       .map((m, i) => ({ m, i }))
       .filter(({ i }) => this.hits[i] === 0)
