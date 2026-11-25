@@ -33,6 +33,7 @@ export async function verifyDataFlow(
     loginAs?: string;
     viewport?: { width: number; height: number };
     mockApi?: ApiMock[];
+    captureBodies?: string[];
   },
   session: BrowserSession,
   routeAnalyzer: RouteAnalyzer,
@@ -116,6 +117,7 @@ export async function verifyDataFlow(
     viewport: args.viewport,
     settleMs: args.settleMs ?? 500,
     mockApi: args.mockApi,
+    captureBodies: args.captureBodies,
     // Reveal a click-switched section first (if any), then run any caller
     // mutations — all before we read the network, so the section's own fetches
     // AND the mutations count as observed calls.

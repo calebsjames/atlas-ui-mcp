@@ -105,7 +105,7 @@ export async function runAction(page: Page, a: FlowAction, ctx: ActionContext = 
         throw new Error(`Unknown action type: ${(a as FlowAction).type}`);
     }
   } catch (err) {
-    throw await explainHiddenMatches(err, base, a);
+    throw await explainFailure(err, page, base, target, a);
   }
 }
 
@@ -200,25 +200,115 @@ async function upload(
   return `${files.detail} via ${chooser ? "the file chooser" : "the file input"}`;
 }
 
+/** Actions Playwright only performs on an ENABLED element (its actionability check). */
+const NEEDS_ENABLED = new Set<FlowAction["type"]>(["click", "fill", "select", "check", "uncheck"]);
+
 /**
- * On timeout, say WHY when the answer is "everything that matched is hidden"
- * — the raw Playwright log shows retries against a resolved-but-hidden node,
- * which reads like a flaky click rather than a selector problem.
+ * On timeout, say WHY when the page can tell us: everything that matched is
+ * hidden, the scoped (`within`) container does not exist, or the target is
+ * disabled. The raw Playwright log shows retries against a resolved node,
+ * which reads like a flaky click rather than a selector or state problem.
  */
-async function explainHiddenMatches(err: unknown, base: Locator, a: FlowAction): Promise<unknown> {
+async function explainFailure(err: unknown, page: Page, base: Locator, target: Locator, a: FlowAction): Promise<unknown> {
   if (!(err instanceof Error) || !err.message.includes("Timeout")) return err;
+  const on = `Action "${a.type}" on ${a.selector}${a.within ? ` within ${JSON.stringify(a.within)}` : ""}`;
   try {
     const total = await base.count();
+    if (total === 0 && a.within && a.selector) {
+      const alone = await page.locator(a.selector).count();
+      const scope = parseWithin(a.within);
+      return new Error(
+        "selector" in scope
+          ? `${on}: no match. "within" was read as a container SELECTOR (it uses Playwright selector syntax); ` +
+            `${a.selector} alone matches ${alone} element(s) on the page. ${err.message}`
+          : `${on}: no element contains both that text and a match for ${a.selector} ` +
+            `(${a.selector} alone matches ${alone} element(s) on the page). "within" is matched as TEXT ` +
+            `(case-insensitive substring of the row/card); to scope by a container selector instead, write it with ` +
+            `an engine prefix, e.g. "within": "css=tr.selected". ${err.message}`
+      );
+    }
     if (total > 0 && (await base.filter({ visible: true }).count()) === 0) {
       return new Error(
         `Action "${a.type}" on ${a.selector}: ${total} match(es) but none visible ` +
           `(hidden duplicates / collapsed container?). ${err.message}`,
       );
     }
+    if (total > 0 && NEEDS_ENABLED.has(a.type)) {
+      const state = await target.evaluate(
+        (el) => {
+          const aria = el.closest('[aria-disabled="true"]');
+          const name = (e: Element) => `<${e.tagName.toLowerCase()}${e.id ? "#" + e.id : ""}>`;
+          return {
+            native: el.matches(":disabled"),
+            aria: aria ? (aria === el ? "self" : name(aria)) : null,
+          };
+        },
+        undefined,
+        { timeout: 1000 }
+      );
+      if (state.native) {
+        return new Error(
+          `${on}: the target is natively disabled (the \`disabled\` attribute, or a disabled <fieldset>), so the ` +
+            `${a.type} timed out waiting for it to be enabled. A disabled control cannot be clicked, focused or ` +
+            `activated from the keyboard: it is disabled by design until a precondition is met (a required field, ` +
+            `a selection, a permission). Satisfy that first, or report the disabled state as the finding. ${err.message}`
+        );
+      }
+      if (state.aria) {
+        const press = JSON.stringify({ type: "press", selector: a.selector, ...(a.within ? { within: a.within } : {}), key: "Space" });
+        return new Error(
+          `${on}: the target is disabled: aria-disabled="true"${state.aria === "self" ? "" : ` on its ancestor ${state.aria}`}. ` +
+            `Playwright waits for a control to be enabled, so the ${a.type} timed out. Either the control is disabled by ` +
+            `design (a precondition such as a required field or a selection is not met: satisfy it, or report the ` +
+            `disabled state as the finding), or the app still handles activation on it (an aria-disabled control stays ` +
+            `focusable): then use ${press} (or "Enter"), which does not wait for enabled. ${err.message}`
+        );
+      }
+    }
   } catch {
     // Page navigated away or closed mid-diagnosis — keep the original error.
   }
   return err;
+}
+
+/** A selector engine prefix (`text=`, `role=`, `css=`, `xpath=`, `data-testid=`, …). */
+const ENGINE_PREFIX =
+  /^(?:text|role|css|xpath|id|data-testid|data-test-id|data-test|nth|visible|has|has-not|has-text|has-not-text|internal:[a-z-]+|_react|_vue)\s*=/i;
+
+/**
+ * Does this selector use syntax only Playwright understands (an engine prefix,
+ * a `>>` chain, XPath, or a quoted-text shorthand)? Such a selector cannot be
+ * embedded in a CSS `:has(...)`.
+ */
+export function isPlaywrightSyntax(selector: string): boolean {
+  const s = selector.trim();
+  return s.includes(">>") || ENGINE_PREFIX.test(s) || s.startsWith("//") || s.startsWith("..") || /^(["']).*\1$/s.test(s);
+}
+
+/**
+ * How to read `within`: text (the documented form), or — when it is written
+ * in Playwright selector syntax — a container selector. `text=RK-003` is text
+ * (the `text=` engine would match only the innermost node holding the text,
+ * never the row around it).
+ */
+export function parseWithin(within: string): { text: string | RegExp } | { selector: string } {
+  const s = within.trim();
+  const text = /^text\s*=\s*([\s\S]*)$/i.exec(s);
+  if (text && !s.includes(">>")) {
+    const v = text[1].trim();
+    const re = /^\/(.+)\/([a-z]*)$/s.exec(v);
+    if (re) {
+      try {
+        return { text: new RegExp(re[1], re[2]) };
+      } catch {
+        /* not a regex after all — literal text */
+      }
+    }
+    const quoted = /^(["'])([\s\S]*)\1$/.exec(v);
+    return { text: quoted ? quoted[2] : v };
+  }
+  if (s.includes(">>") || ENGINE_PREFIX.test(s)) return { selector: s };
+  return { text: within };
 }
 
 /**
@@ -229,11 +319,25 @@ async function explainHiddenMatches(err: unknown, base: Locator, a: FlowAction):
  * innermost, so ancestors (body, list wrapper) never win and same-text
  * matches in OTHER rows are excluded because their row doesn't contain this
  * row's text. The caller applies the visible-match filter and `.first()`.
+ *
+ * A plain CSS `selector` is composed into one CSS selector. A `selector` in
+ * Playwright syntax (`text=Open`, `role=button[name="Open"]`, `button >> nth=0`)
+ * is not valid inside `:has(...)`, so the same innermost-container rule is
+ * built from locator filters instead. A `within` written as a selector
+ * (`css=tr.selected`, `role=row[name="RK-003"]`, anything with `>>`) is the
+ * container itself.
  */
 function scopedTarget(page: Page, selector: string, within: string) {
-  const text = JSON.stringify(within);
-  const container = `:has-text(${text}):has(${selector})`;
-  return page.locator(`${container}:not(:has(${container}))`).locator(selector);
+  const scope = parseWithin(within);
+  if ("selector" in scope) return page.locator(scope.selector).locator(selector);
+  if (typeof scope.text === "string" && !isPlaywrightSyntax(selector)) {
+    const text = JSON.stringify(scope.text);
+    const container = `:has-text(${text}):has(${selector})`;
+    return page.locator(`${container}:not(:has(${container}))`).locator(selector);
+  }
+  const hasText = scope.text;
+  const containers = () => page.locator("*").filter({ hasText, has: page.locator(selector) });
+  return containers().filter({ hasNot: containers() }).locator(selector);
 }
 
 const DEFAULT_MEASURE_STYLES = ["display", "position", "overflow-x", "overflow-y", "z-index", "font-size"];
@@ -326,17 +430,44 @@ export function describeAction(a: FlowAction, detail?: string): string {
 export function toApiCalls(requests: NetworkEntry[]): ApiCall[] {
   const MAX_PER_SLICE = 30;
   const seen = new Set<string>();
+  // Calls whose body was asked for (`captureBodies`) are kept apart from the
+  // dedupe-and-cap above: they dedupe by method + path + query, a repeat with
+  // a DIFFERENT body is kept too, and they never count against (or get cut
+  // by) the 30-call cap — a requested body is not lost to a chatty step.
+  const lastBody = new Map<string, unknown>();
+  let plain = 0;
+  let withBody = 0;
   const out: ApiCall[] = [];
   for (const r of requests) {
     if (!isApiRequest(r)) continue;
     const p = toPathname(r.url);
     const key = r.method + " " + p;
-    if (seen.has(key)) continue;
+    const call = { method: r.method, path: p, status: r.status, ...bodyFields(r), ...(r.mocked ? { mocked: true } : {}) };
+    if (r.responseBody) {
+      const query = toSearch(r.url);
+      const bodyKey = key + query;
+      const prev = lastBody.get(bodyKey);
+      if (prev === r.responseBody || (prev && r.responseBody.omitted) || withBody >= MAX_PER_SLICE) continue;
+      lastBody.set(bodyKey, r.responseBody);
+      withBody++;
+      out.push({ ...call, ...(query ? { query } : {}), responseBody: r.responseBody });
+      continue;
+    }
+    if (seen.has(key) || plain >= MAX_PER_SLICE) continue;
     seen.add(key);
-    out.push({ method: r.method, path: p, status: r.status, ...bodyFields(r), ...(r.mocked ? { mocked: true } : {}) });
-    if (out.length >= MAX_PER_SLICE) break;
+    plain++;
+    out.push(call);
   }
   return out;
+}
+
+/** URL → its query string including "?", or "" when there is none. */
+function toSearch(url: string): string {
+  try {
+    return new URL(url).search;
+  } catch {
+    return "";
+  }
 }
 
 /** The response-size / row-count fields of an entry, each omitted when absent. */

@@ -2,12 +2,91 @@
 
 ## Unreleased
 
+### ECS-715 — response bodies, mocks from a file, automatic re-login, click failures that explain themselves
+
+From an audit of the Studio agent's self-reviews: it guessed the shape of
+real responses when writing mocks (developers later found data bugs), pasted
+an 11 KB mock into every `capture_flow` call, ran logged out after the session
+expired mid-turn with only a failed click to show for it, and spent repeated
+runs on two click failures whose errors named no cause.
+
+#### Added
+
+- **`captureBodies`** on `check_page`, `render_component`, `verify_data_flow`
+  and `capture_flow` (whole flow): an array of path patterns in the `mockApi`
+  path forms (exact, `*`/`**` glob, `re:` regex, full URL), each optionally
+  prefixed with a method. A matching API call's `apiCalls` entry carries
+  `responseBody: {json | text, contentType, truncated?, originalBytes?,
+  truncation?, redacted?, omitted?}`. Off unless passed. Bounded at 16,000
+  chars per body, 48,000 per call and 20 bodies per call; a JSON body over the
+  cap is shortened structurally (first rows of long arrays, head of long
+  strings) and stays valid JSON, with `truncated: true`, `originalBytes` and
+  `truncation` (what was cut, by JSON path). Values under credential-looking
+  keys and JWTs become `"[redacted]"`; login traffic is never captured.
+  Body-carrying entries are kept apart from the method + path dedupe and the
+  30-call cap (deduped by method + path + query, with `query` on the entry).
+  The result carries a `captureBodies` report (`patterns`, `bodies`, `chars`,
+  `limits`, `unmatched` with `nearMisses`); `check_page` / `render_component`
+  / `verify_data_flow` include `apiCalls` when `captureBodies` is passed.
+  Aliases `bodies` / `responseBodies`.
+- **`jsonFile` / `bodyFile`** on a `mockApi` stub: the body is read from a
+  file relative to the workspace root, and refused when the path resolves
+  outside it (lexically or through a symlink). `jsonFile` is parsed and
+  validated; `bodyFile` is served as-is with a content-type by extension.
+  Missing file, invalid JSON, a file over 5 MB and more than one body field
+  are reported with the other stub problems before the browser starts. The
+  `mockApi.mocks[]` entry carries `file`.
+- **Automatic re-login.** An authenticated call whose first navigation finds
+  the session signed out — it ended on `browser.login.url` though another URL
+  was asked for, or its real API calls answered 401 (all, or two or more that
+  are at least half) — drops that profile's context, signs in again and
+  retries once. Results carry `reloggedIn: true` and `reloginReason`
+  (`check_page`, `render_component`, `verify_data_flow`, `capture_flow`,
+  `inspect_rendered_page`). Never loops. When the re-login succeeds and the
+  retry still shows the signal (a role without access to those calls, or a
+  page the app bounces it from), the normal result is returned with
+  `stillSignedOut: true` and a `warning` (the login worked; likely causes;
+  `reset_login` as the manual step), and that profile's session reports the
+  warning on later such calls without signing in again, until `reset_login`.
+  A login flow that cannot complete fails the call with `the automatic
+  re-login failed`. Not for public calls,
+  a call for the login page itself, stubbed 401s, or a session the same call
+  just created; `loginAs` re-logs only that profile. `browser.autoRelogin:
+  false` turns it off.
+
+#### Fixed
+
+- **`within` with a Playwright-syntax `selector`** (`text=Open`,
+  `role=button[name="Delete"]`, `button >> nth=0`, XPath, quoted text) failed
+  with a CSS parse error, because the selector was composed into `:has(...)`.
+  The innermost-container rule is now built from locator filters for such
+  selectors; a plain CSS selector takes the same path as before. `within`
+  written as `text=…` is read as text; written with another engine prefix or
+  a `>>` chain it is the container selector. A `within` that matches no
+  container says so and shows how to scope by selector.
+- **A click on a disabled control timed out with no hint.** When `click` /
+  `fill` / `select` / `check` / `uncheck` times out on a target that is
+  `aria-disabled="true"` (itself or through an ancestor) or natively
+  disabled, the error says so; for `aria-disabled` it names the alternative
+  (`{"type": "press", "selector": …, "key": "Space"}` or `Enter`), or that
+  the control is disabled by design.
+
+#### Changed
+
+- `compileMocks(raw, { baseDir })` takes the workspace root for file bodies;
+  `BrowserSession.runFlowDetailed` also returns `captureBodies`, `reloggedIn`,
+  `reloginReason`, `stillSignedOut` and `warning`; `BrowserSession.navigate` throws `SignedOutError` when
+  an authenticated call's first navigation is signed out (tools that drive a
+  page through `withPage` must let it propagate).
+
+### ECS-619 — mockApi, drag, upload, signedInAs
+
 Four runtime capabilities from 36 Studio self-reviews: agents building a
 screen before its server part existed, drag and upload controls no flow could
 operate, and a preview showing different data than the agent with no way to
 rule out a different account.
 
-### Added
+#### Added
 
 - **`mockApi`** on `check_page`, `render_component`, `verify_data_flow` and
   `capture_flow` (whole flow): `[{method?, path, query?, status?, json? |
@@ -41,7 +120,7 @@ rule out a different account.
   `as`, `original`), `mismatch` when the app user is not the login email, and
   a one-line `summary`.
 
-### Changed
+#### Changed
 
 - `runAction` returns `{ measurement?, detail? }` (was a bare Measurement)
   and takes an optional context (the workspace root for relative upload

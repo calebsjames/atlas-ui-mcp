@@ -23,6 +23,47 @@ export interface NetworkEntry {
   totalCount?: number;
   /** Fulfilled by a `mockApi` stub for this call — the real API never saw it. */
   mocked?: boolean;
+  /** The response body, when this call's `captureBodies` asked for it. */
+  responseBody?: CapturedBody;
+}
+
+/**
+ * A response body returned because the call's `captureBodies` matched it:
+ * `json` (parsed) when the body is JSON, else `text`. Bounded — a body over
+ * the cap is shortened and says so.
+ */
+export interface CapturedBody {
+  /** The parsed JSON body. When `truncated`, long arrays keep their first rows and long strings their head. */
+  json?: unknown;
+  /** A non-JSON body (or JSON that could not be shortened under the cap), cut at the cap when `truncated`. */
+  text?: string;
+  /** The response's content-type, without parameters. */
+  contentType?: string;
+  /** Set when the body was shortened to fit the cap. */
+  truncated?: true;
+  /** The full body's size in bytes, when `truncated`. */
+  originalBytes?: number;
+  /** What was cut, by JSON path — e.g. "$.items: kept 3 of 1578 rows". */
+  truncation?: string[];
+  /** How many credential-looking values (token/password/secret keys, JWTs) were replaced with "[redacted]". */
+  redacted?: number;
+  /** Why no body is here (binary, empty, over the read limit, or the per-call budget is used up). */
+  omitted?: string;
+}
+
+/** What a call's `captureBodies` patterns did. */
+export interface BodyCaptureReport {
+  /** Each pattern and how many API responses it matched. */
+  patterns: Array<{ pattern: string; matched: number }>;
+  /** Distinct bodies captured, and their total size in characters. */
+  bodies: number;
+  chars: number;
+  limits: { perBodyChars: number; perCallChars: number; perCallBodies: number };
+  /** How many captured bodies were shortened. */
+  truncated?: number;
+  /** Patterns no API call matched, with observed calls that look like near misses. */
+  unmatched?: Array<{ pattern: string; nearMisses?: string[] }>;
+  warning?: string;
 }
 
 export interface CaptureResult {
@@ -52,8 +93,22 @@ export interface CaptureResult {
   pendingRequests?: string[];
   /** Which stubs matched (and which matched nothing), when `mockApi` was passed. */
   mockApi?: MockReport;
+  /** What the `captureBodies` patterns matched, when it was passed. */
+  captureBodies?: BodyCaptureReport;
   /** Who the browser is signed in as for this call (login account + the app's own user). */
   signedInAs?: SignedInAs;
+  /** Set when the session was found signed out and this call signed in again before its (retried) navigation. */
+  reloggedIn?: true;
+  /** What showed the session was signed out, when `reloggedIn`. */
+  reloginReason?: string;
+  /**
+   * Set when the page still looks signed out although the login works: a
+   * re-login (in this call, or earlier on this session) succeeded and the
+   * signal remained. The result is otherwise complete; `warning` explains.
+   */
+  stillSignedOut?: true;
+  /** With `stillSignedOut`: the login worked, the likely causes, and reset_login as the manual step. */
+  warning?: string;
   /** True if nothing went wrong: no page errors, console errors, or failed requests. */
   clean: boolean;
   durationMs: number;
@@ -92,6 +147,12 @@ export interface CaptureOptions {
   measure?: string[];
   /** API stubs for THIS call only (see ApiMock); removed when the call ends. */
   mockApi?: ApiMock[];
+  /**
+   * Opt-in response bodies: path patterns (the forms `ApiMock.path` takes,
+   * optionally prefixed with a method). A matching API call's entry carries
+   * `responseBody`. Off unless passed.
+   */
+  captureBodies?: string[];
 }
 
 /**
@@ -116,15 +177,22 @@ export interface ApiMock {
   status?: number;
   /** JSON response body (sets content-type application/json). */
   json?: unknown;
+  /**
+   * JSON response body read from a file — relative to the workspace root, and
+   * refused if it resolves outside it. Parsed and validated before the call.
+   */
+  jsonFile?: string;
   /** Raw response body (content-type text/plain unless `headers` sets one). */
   body?: string;
+  /** Raw response body read from a file (same path rule; content-type by extension). */
+  bodyFile?: string;
   /** Extra response headers. */
   headers?: Record<string, string>;
 }
 
 /** What a call's stubs did: hits per stub, and any stub that matched nothing. */
 export interface MockReport {
-  mocks: Array<{ method: string; path: string; status: number; hits: number }>;
+  mocks: Array<{ method: string; path: string; status: number; hits: number; file?: string }>;
   /** Stubs no request matched, with observed API calls that look like near misses. */
   unmatched?: Array<{ method: string; path: string; nearMisses?: string[] }>;
   warning?: string;
@@ -197,7 +265,10 @@ export interface FlowAction {
    * contains BOTH this text AND a `selector` match — "the Open Kit button in
    * the row containing RK-003" without hand-writing container CSS. When the
    * scoped target is disabled, the action still fails loudly (a disabled
-   * control is signal, not an obstacle to route around).
+   * control is signal, not an obstacle to route around). `selector` may use
+   * Playwright syntax here too. `within` itself is text; written with an
+   * engine prefix other than `text=` (`css=tr.selected`, `role=row[...]`) or a
+   * `>>` chain it is a container selector instead.
    */
   within?: string;
   /** Value for `fill` / `select`. */
@@ -312,4 +383,8 @@ export interface ApiCall {
   totalCount?: number;
   /** Fulfilled by a `mockApi` stub, not the real API. */
   mocked?: boolean;
+  /** The query string (with "?") of a call that carries `responseBody` — bodies differ by query. */
+  query?: string;
+  /** The response body, when the call's `captureBodies` matched this call. */
+  responseBody?: CapturedBody;
 }

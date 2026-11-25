@@ -90,6 +90,12 @@ export interface BrowserConfig {
   longPollMs?: number;
   /** page.goto timeout (default 30000). */
   navigationTimeoutMs?: number;
+  /**
+   * Sign in again automatically when an authenticated call finds the session
+   * signed out (default true): once per call, then the navigation is retried
+   * once. Set false to get the signed-out page back as-is.
+   */
+  autoRelogin?: boolean;
 }
 
 /**

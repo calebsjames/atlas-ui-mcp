@@ -4,6 +4,7 @@ import type { Browser, BrowserContext, Page } from "playwright";
 import type { BrowserConfig, BrowserLoginConfig } from "../types.js";
 import type {
   ApiMock,
+  BodyCaptureReport,
   CaptureOptions,
   CaptureResult,
   ConsoleEntry,
@@ -17,6 +18,7 @@ import type {
 } from "./types.js";
 import { describeAction, runAction, toApiCalls, type ActionContext } from "./actions.js";
 import { compileMocks, MockRouter } from "./mockApi.js";
+import { BodyCapture, compileBodyPatterns, MAX_BODY_READ_BYTES } from "./captureBodies.js";
 import { describeUser, extractIdentity, loginAccount, readStorageEntries, type ExtractedIdentity } from "./identity.js";
 import { isApiRequest, summarizeJsonBody } from "./network.js";
 import {
@@ -52,6 +54,36 @@ interface DiagBuffers {
   byRequest: WeakMap<object, NetworkEntry>;
   /** Requests a `mockApi` stub fulfilled (in case the route fires before the request event). */
   mocked: WeakSet<object>;
+  /** The running call's `captureBodies`, when it asked for response bodies; null between calls. */
+  bodyCapture: BodyCapture | null;
+}
+
+/**
+ * An authenticated call's first navigation found the session signed out: the
+ * caller signs in again and retries the call once. Never thrown by that
+ * retry — a page that still looks signed out after a successful re-login is
+ * returned with a warning (`stillSignedOut`), not an error.
+ */
+export class SignedOutError extends Error {
+  constructor(readonly reason: string) {
+    super(reason);
+    this.name = "SignedOutError";
+  }
+}
+
+/** Armed on an authed call's page; checked (once) after its first navigation. */
+interface AuthWatch {
+  profile: string;
+  login: BrowserLoginConfig;
+  /** diag.requests length when armed — the navigation's API calls start here. */
+  mark: number;
+  /**
+   * What a signed-out signal leads to: "relogin" (sign in again, retry once);
+   * "afterRelogin" (this call already did — warn, and mark the session);
+   * "futile" (an earlier re-login on this session did not clear the signal —
+   * warn without signing in again).
+   */
+  mode: "relogin" | "afterRelogin" | "futile";
 }
 
 /** What the app's storage said about the signed-in user, and when/where it was read. */
@@ -87,6 +119,36 @@ interface Profile {
   lastUrl: string | null;
   /** The app's signed-in user as last read from this profile's storage (for server_info). */
   identity: ObservedIdentity | null;
+  /**
+   * Set when an automatic re-login succeeded and the page STILL looked signed
+   * out (a role without access to those calls, typically). Until reset_login
+   * replaces this session, later calls report the signal as a warning and do
+   * not sign in again.
+   */
+  reloginFutile: boolean;
+}
+
+/** Options of a flow (`runFlow` / `runFlowDetailed`). */
+export type FlowOptions = {
+  settleMs?: number;
+  waitUntil?: WaitUntil;
+  mockApi?: ApiMock[];
+  /** Opt-in response bodies for the whole flow (see CaptureOptions.captureBodies). */
+  captureBodies?: string[];
+} & PageOptions;
+
+/** What a flow returns beyond its steps. */
+export interface FlowResult {
+  steps: FlowStepResult[];
+  signedInAs: SignedInAs;
+  mockApi?: MockReport;
+  captureBodies?: BodyCaptureReport;
+  /** Set when the session was found signed out and the flow signed in again before its (retried) first navigation. */
+  reloggedIn?: true;
+  reloginReason?: string;
+  /** Set when the page still looks signed out although a re-login succeeded (see CaptureResult). */
+  stillSignedOut?: true;
+  warning?: string;
 }
 
 /** Per-call page options shared by every runtime entry point. */
@@ -97,6 +159,9 @@ export interface PageOptions {
   /** Viewport for THIS call's page only (the next call gets the configured default). */
   viewport?: { width: number; height: number };
 }
+
+/** ensurePage's internal options: `afterRelogin` marks the one retry after an automatic re-login. */
+type EnsurePageOptions = PageOptions & { afterRelogin?: boolean };
 
 const DEFAULT_PROFILE = "default";
 
@@ -110,6 +175,13 @@ export class BrowserSession {
   private profiles = new Map<string, Profile>();
   private outputDirAbs: string;
   private diagByPage = new WeakMap<Page, DiagBuffers>();
+  private authWatch = new WeakMap<Page, AuthWatch>();
+  /** Per profile: why its most recent call signed in again (absent when it did not). */
+  private lastRelogin = new Map<string, string>();
+  /** The still-signed-out warning of a page whose first navigation showed the signal after (or without) a re-login. */
+  private signedOutWarning = new WeakMap<Page, string>();
+  /** Per profile: the most recent call's still-signed-out warning (absent when there was none). */
+  private lastWarning = new Map<string, string>();
 
   constructor(
     private readonly workspaceRoot: string,
@@ -186,7 +258,7 @@ export class BrowserSession {
     if (!p) {
       p = {
         name, context: null, page: null, diag: null, loggedIn: false,
-        loginError: null, sessionSnapshot: null, lastUrl: null, identity: null,
+        loginError: null, sessionSnapshot: null, lastUrl: null, identity: null, reloginFutile: false,
       };
       this.profiles.set(name, p);
     }
@@ -237,7 +309,7 @@ export class BrowserSession {
    * pre-step runs (once per profile) before returning.
    */
   private async ensurePage(
-    opts: PageOptions = {}
+    opts: EnsurePageOptions = {}
   ): Promise<{ page: Page; diag: DiagBuffers; profile: Profile }> {
     const p = this.profile(opts.loginAs);
     const context = await this.ensureContext(p);
@@ -260,8 +332,40 @@ export class BrowserSession {
       }, p.sessionSnapshot);
     }
 
+    const wasLoggedIn = p.loggedIn;
+    // The login pre-step records where it ended as the profile's last URL;
+    // after a re-login, "the previous page" is still the one before it.
+    const lastUrl = opts.afterRelogin ? p.lastUrl : null;
     if (opts.requireAuth || opts.loginAs) {
-      await this.ensureLoggedIn(p);
+      try {
+        await this.ensureLoggedIn(p);
+        if (lastUrl) p.lastUrl = lastUrl;
+      } catch (err) {
+        if (!opts.afterRelogin) throw err;
+        throw new Error(
+          `The session was signed out and the automatic re-login failed: ${errMessage(err)} ` +
+            "Not retried again — fix the login, then call reset_login."
+        );
+      }
+    }
+
+    // Watch this call's first navigation for a signed-out session — when the
+    // call needs auth and the session predates it (a login that just ran is
+    // not an expired one), or when this IS the one retry after a re-login.
+    const login = this.loginFor(p.name);
+    if (
+      opts.requireAuth &&
+      login &&
+      p.loggedIn &&
+      this.config.autoRelogin !== false &&
+      (wasLoggedIn || opts.afterRelogin)
+    ) {
+      this.authWatch.set(page, {
+        profile: p.name,
+        login,
+        mark: p.diag.requests.length,
+        mode: opts.afterRelogin ? "afterRelogin" : p.reloginFutile ? "futile" : "relogin",
+      });
     }
 
     return { page, diag: p.diag, profile: p };
@@ -460,13 +564,7 @@ export class BrowserSession {
   async resetLogin(opts: { relogin?: boolean; loginAs?: string } = {}): Promise<{ loggedIn: boolean; error?: string }> {
     const names = opts.loginAs ? [opts.loginAs] : [...this.profiles.keys()];
     if (opts.loginAs) this.loginFor(opts.loginAs); // validate before tearing anything down
-    for (const name of names) {
-      const p = this.profiles.get(name);
-      if (!p) continue;
-      await p.page?.close().catch(() => {});
-      await p.context?.close().catch(() => {});
-      this.profiles.delete(name);
-    }
+    for (const name of names) await this.dropProfile(name);
 
     const target = opts.loginAs ?? DEFAULT_PROFILE;
     if (!this.loginFor(target)) return { loggedIn: false };
@@ -481,6 +579,132 @@ export class BrowserSession {
       }
     }
     return { loggedIn: false };
+  }
+
+  /** Close a profile's page and context (cookies + storage) and forget it. */
+  private async dropProfile(name: string): Promise<void> {
+    const p = this.profiles.get(name);
+    if (!p) return;
+    await p.page?.close().catch(() => {});
+    await p.context?.close().catch(() => {});
+    this.profiles.delete(name);
+  }
+
+  /**
+   * Run one authenticated call; if its first navigation finds the session
+   * signed out (SignedOutError), sign in again — the profile's context is
+   * dropped, exactly as reset_login does, so no stale cookie or token
+   * survives — and run the call ONCE more. The second run's navigation is
+   * watched too, but never throws: a page that still looks signed out comes
+   * back with a warning (see checkSignedOut). Never a loop. A login flow that
+   * cannot complete throws from the second run.
+   */
+  private async withAutoRelogin<T>(
+    opts: PageOptions,
+    run: (afterRelogin: boolean) => Promise<T>
+  ): Promise<{ result: T; reloggedIn?: true; reloginReason?: string }> {
+    const name = opts.loginAs ?? DEFAULT_PROFILE;
+    this.lastRelogin.delete(name);
+    this.lastWarning.delete(name);
+    try {
+      return { result: await run(false) };
+    } catch (err) {
+      if (!(err instanceof SignedOutError)) throw err;
+      // Keep where the profile last was: a flow that starts "on the current page" reopens it.
+      const lastUrl = this.profiles.get(name)?.lastUrl ?? null;
+      await this.dropProfile(name);
+      this.profile(name).lastUrl = lastUrl;
+      const result = await run(true);
+      this.lastRelogin.set(name, err.reason);
+      return { result, reloggedIn: true, reloginReason: err.reason };
+    }
+  }
+
+  /**
+   * `{ reloggedIn: true, reloginReason }` when `loginAs`'s most recent call
+   * found the session signed out and signed in again, plus
+   * `{ stillSignedOut: true, warning }` when its page still looked signed out
+   * — for tools that drive the page via withPage. Empty otherwise.
+   */
+  reloginInfo(loginAs?: string): { reloggedIn?: true; reloginReason?: string; stillSignedOut?: true; warning?: string } {
+    const name = loginAs ?? DEFAULT_PROFILE;
+    const reason = this.lastRelogin.get(name);
+    const warning = this.lastWarning.get(name);
+    return {
+      ...(reason ? { reloggedIn: true as const, reloginReason: reason } : {}),
+      ...(warning ? { stillSignedOut: true as const, warning } : {}),
+    };
+  }
+
+  /** `{ stillSignedOut: true, warning }` when this call's page still looked signed out; empty otherwise. */
+  private stillSignedOut(page: Page): { stillSignedOut?: true; warning?: string } {
+    const warning = this.signedOutWarning.get(page);
+    return warning ? { stillSignedOut: true, warning } : {};
+  }
+
+  /**
+   * After an authed call's first navigation: is the session signed out? One
+   * shot per page. Two signals, either is enough:
+   *  - the page ended on the login page (`browser.login.url`) though the call
+   *    asked for another URL;
+   *  - the navigation's real (un-stubbed) API calls answered 401 — all of
+   *    them, or at least two that are at least half of them.
+   * On a signal: throws SignedOutError when the call may still sign in again.
+   * When it already did (and the login succeeded), or an earlier re-login on
+   * this session did not clear the signal, nothing is thrown: the page gets a
+   * warning for the result (`stillSignedOut`) and the session is marked so
+   * later calls do not sign in again for it — a correctly signed-in role
+   * whose page calls endpoints it has no access to keeps its screenshot and
+   * apiCalls.
+   */
+  private checkSignedOut(page: Page, requested: string): void {
+    const watch = this.authWatch.get(page);
+    if (!watch) return;
+    this.authWatch.delete(page);
+    const reason = this.signedOutReason(page, watch, requested);
+    if (!reason) return;
+    if (watch.mode === "relogin") throw new SignedOutError(reason);
+    const where = watch.profile === DEFAULT_PROFILE ? "browser.login" : `browser.profiles.${watch.profile}`;
+    const profile = this.profiles.get(watch.profile);
+    if (profile) profile.reloginFutile = true;
+    const causes =
+      "Likely causes: this account has no access to these calls or this page (expected for a restricted role), " +
+      "or the app is rejecting the session. If the session really is broken, call reset_login (it also re-enables " +
+      "automatic re-login for this profile).";
+    this.signedOutWarning.set(
+      page,
+      watch.mode === "afterRelogin"
+        ? `Signed in again, but the page still looks signed out: ${reason}. The ${where} login flow ran and passed ` +
+          `its success check, so the login worked. ${causes} Not retried; later calls on this session will report ` +
+          "this without signing in again."
+        : `The page looks signed out: ${reason}. An earlier automatic re-login on this session succeeded without ` +
+          `clearing this, so no login was attempted this time. ${causes}`
+    );
+  }
+
+  private signedOutReason(page: Page, watch: AuthWatch, requested: string): string | undefined {
+    const route = (u: URL) =>
+      u.origin + u.pathname.replace(/\/+$/, "") + (u.hash.startsWith("#/") ? u.hash.split("?")[0].replace(/\/+$/, "") : "");
+    try {
+      const loginUrl = new URL(toAbsoluteUrl(this.baseUrl, watch.login.url));
+      const here = new URL(page.url());
+      const target = new URL(requested);
+      if (route(here) === route(loginUrl) && route(target) !== route(loginUrl)) {
+        return `${target.pathname}${target.hash.startsWith("#/") ? target.hash : ""} ended on the login page (${here.pathname}${here.hash.startsWith("#/") ? here.hash.split("?")[0] : ""})`;
+      }
+    } catch {
+      /* about:blank or an unparsable URL — no URL signal */
+    }
+    const diag = this.diagByPage.get(page);
+    if (!diag) return undefined;
+    const answered = diag.requests.slice(watch.mark).filter((r) => isApiRequest(r) && !r.mocked && r.status != null);
+    const unauthorized = answered.filter((r) => r.status === 401);
+    const n = unauthorized.length;
+    if (n > 0 && (n === answered.length || (n >= 2 && n * 2 >= answered.length))) {
+      const paths = [...new Set(unauthorized.map((r) => `${r.method} ${pathOf(r.url)}`))];
+      return `${n} of ${answered.length} API call(s) answered 401 (${paths.slice(0, 3).join(", ")}${paths.length > 3 ? ", …" : ""})`;
+    }
+    return undefined;
   }
 
   /**
@@ -540,19 +764,30 @@ export class BrowserSession {
    * (console errors/warnings, uncaught exceptions, failed + all network requests).
    */
   async capture(url: string, opts: CaptureOptions = {}): Promise<CaptureResult> {
+    const { result, ...relogin } = await this.withAutoRelogin(opts, (afterRelogin) =>
+      this.captureOnce(url, opts, afterRelogin)
+    );
+    return { ...result, ...relogin };
+  }
+
+  private async captureOnce(url: string, opts: CaptureOptions, afterRelogin: boolean): Promise<CaptureResult> {
     // Validate stubs before any browser work, so a typo fails fast.
-    const router = mockRouter(opts.mockApi);
+    const router = mockRouter(opts.mockApi, this.workspaceRoot);
+    const bodies = bodyCapture(opts.captureBodies);
     const { page, diag, profile } = await this.ensurePage({
       requireAuth: opts.requireAuth !== false,
       loginAs: opts.loginAs,
       viewport: opts.viewport,
+      afterRelogin,
     });
-    // Stubs go on AFTER login (login traffic is real) and come off when the
-    // call ends, even if it throws.
+    // Stubs and body capture go on AFTER login (login traffic is real, and is
+    // never captured) and come off when the call ends, even if it throws.
     try {
       if (router) await router.install(page, (req) => this.markMocked(diag, req));
-      return await this.captureOnPage(page, diag, profile, url, opts, router);
+      diag.bodyCapture = bodies ?? null;
+      return await this.captureOnPage(page, diag, profile, url, opts, router, bodies);
     } finally {
+      diag.bodyCapture = null;
       await router?.uninstall();
     }
   }
@@ -563,7 +798,8 @@ export class BrowserSession {
     profile: Profile,
     url: string,
     opts: CaptureOptions,
-    router: MockRouter | undefined
+    router: MockRouter | undefined,
+    bodies: BodyCapture | undefined
   ): Promise<CaptureResult> {
     // Record buffer positions so we report only THIS call's diagnostics, not
     // everything accumulated on the shared page since login.
@@ -575,6 +811,8 @@ export class BrowserSession {
     try {
       pendingRequests = await this.navigate(page, url, opts.waitUntil);
     } catch (err) {
+      // Signed out: the caller signs in again and retries.
+      if (err instanceof SignedOutError) throw err;
       // A nav timeout still leaves a renderable page; record it and continue so
       // the agent gets a screenshot + whatever diagnostics accumulated.
       diag.pageErrors.push(`Navigation issue: ${errMessage(err)}`);
@@ -648,7 +886,9 @@ export class BrowserSession {
       ...(measurements.length ? { measurements } : {}),
       ...(viewport ? { viewport } : {}),
       ...(router ? { mockApi: router.report(requests) } : {}),
+      ...(bodies ? { captureBodies: bodies.report(requests) } : {}),
       signedInAs,
+      ...this.stillSignedOut(page),
       clean:
         consoleErrors.length === 0 &&
         pageErrors.length === 0 &&
@@ -691,8 +931,9 @@ export class BrowserSession {
             : "")
       );
     }
-    if (waitUntil === "quiet") return this.waitForQuiet(page);
-    return undefined;
+    const pending = waitUntil === "quiet" ? await this.waitForQuiet(page) : undefined;
+    this.checkSignedOut(page, url);
+    return pending;
   }
 
   /**
@@ -735,13 +976,18 @@ export class BrowserSession {
     fn: (page: Page) => Promise<T>,
     opts: PageOptions = {}
   ): Promise<T> {
-    const { page, profile } = await this.ensurePage({ ...opts, requireAuth: opts.requireAuth !== false });
-    try {
-      return await fn(page);
-    } finally {
-      // Who the page was signed in as, for the caller's signedInAs().
-      this.lastObservation.set(profile.name, await this.observeIdentity(profile, page));
-    }
+    const { result } = await this.withAutoRelogin(opts, async (afterRelogin) => {
+      const { page, profile } = await this.ensurePage({ ...opts, requireAuth: opts.requireAuth !== false, afterRelogin });
+      try {
+        return await fn(page);
+      } finally {
+        // Who the page was signed in as, for the caller's signedInAs().
+        this.lastObservation.set(profile.name, await this.observeIdentity(profile, page));
+        const warning = this.signedOutWarning.get(page);
+        if (warning) this.lastWarning.set(profile.name, warning);
+      }
+    });
+    return result;
   }
 
   /**
@@ -753,7 +999,7 @@ export class BrowserSession {
    */
   async runFlow(
     steps: ResolvedFlowStep[],
-    opts: { settleMs?: number; waitUntil?: WaitUntil; mockApi?: ApiMock[] } & PageOptions = {}
+    opts: FlowOptions = {}
   ): Promise<FlowStepResult[]> {
     return (await this.runFlowDetailed(steps, opts)).steps;
   }
@@ -765,28 +1011,41 @@ export class BrowserSession {
    */
   async runFlowDetailed(
     steps: ResolvedFlowStep[],
-    opts: { settleMs?: number; waitUntil?: WaitUntil; mockApi?: ApiMock[] } & PageOptions = {}
-  ): Promise<{ steps: FlowStepResult[]; signedInAs: SignedInAs; mockApi?: MockReport }> {
-    const router = mockRouter(opts.mockApi);
+    opts: FlowOptions = {}
+  ): Promise<FlowResult> {
+    const { result, ...relogin } = await this.withAutoRelogin(opts, (afterRelogin) =>
+      this.runFlowOnce(steps, opts, afterRelogin)
+    );
+    return { ...result, ...relogin };
+  }
+
+  private async runFlowOnce(steps: ResolvedFlowStep[], opts: FlowOptions, afterRelogin: boolean): Promise<FlowResult> {
+    const router = mockRouter(opts.mockApi, this.workspaceRoot);
+    const bodies = bodyCapture(opts.captureBodies);
     // One fresh page for the whole flow, logged in as the requested profile
     // (requireAuth:false for a public flow). Steps share it.
     const { page, diag, profile } = await this.ensurePage({
       requireAuth: opts.requireAuth !== false,
       loginAs: opts.loginAs,
       viewport: opts.viewport,
+      afterRelogin,
     });
     const flowMark = this.markDiag(diag);
     try {
       if (router) await router.install(page, (req) => this.markMocked(diag, req));
+      diag.bodyCapture = bodies ?? null;
       const results = await this.runFlowSteps(page, diag, profile, steps, opts);
       await this.settlePending(diag);
       const signedInAs = await this.endOfCallIdentity(profile, page, opts.requireAuth === false);
       return {
         steps: results,
         signedInAs,
+        ...this.stillSignedOut(page),
         ...(router ? { mockApi: router.report(diag.requests.slice(flowMark.rq)) } : {}),
+        ...(bodies ? { captureBodies: bodies.report(diag.requests.slice(flowMark.rq)) } : {}),
       };
     } finally {
+      diag.bodyCapture = null;
       await router?.uninstall();
     }
   }
@@ -858,6 +1117,9 @@ export class BrowserSession {
         pendingRequests = (await this.waitForQuiet(page)) ?? pendingRequests;
       }
     } catch (err) {
+      // Signed out on the flow's first navigation: nothing has been done yet,
+      // so the caller signs in again and restarts the flow.
+      if (err instanceof SignedOutError) throw err;
       error = errMessage(err);
     }
 
@@ -947,6 +1209,7 @@ export class BrowserSession {
       inflight: new Map(),
       byRequest: new WeakMap(),
       mocked: new WeakSet(),
+      bodyCapture: null,
     };
     this.diagByPage.set(page, d);
     const idleIgnore = this.config.idleIgnore ?? [];
@@ -1000,23 +1263,38 @@ export class BrowserSession {
       // cap. Reading a body is async and can't be awaited from an event handler,
       // so we park the promise and settle it before a call slices diagnostics.
       const contentType = headers["content-type"] || "";
-      if (
+      const summarize =
         isApiRequest(entry) &&
         /\bjson\b/i.test(contentType) &&
-        (entry.bytes == null || entry.bytes <= MAX_BODY_SUMMARY_BYTES)
-      ) {
+        (entry.bytes == null || entry.bytes <= MAX_BODY_SUMMARY_BYTES);
+      // The body itself is read only when THIS call's `captureBodies` names it.
+      const capture = d.bodyCapture;
+      let wanted = !!capture && capture.wants(entry);
+      if (wanted && entry.bytes != null && entry.bytes > MAX_BODY_READ_BYTES) {
+        capture!.omit(entry, `the response is ${entry.bytes} bytes — over the ${MAX_BODY_READ_BYTES}-byte read limit`);
+        wanted = false;
+      }
+      if (summarize || wanted) {
         const p = res
           .body()
           .then((buf) => {
             if (entry.bytes == null) entry.bytes = buf.length;
-            if (buf.length <= MAX_BODY_SUMMARY_BYTES) {
+            if (summarize && buf.length <= MAX_BODY_SUMMARY_BYTES) {
               const summary = summarizeJsonBody(buf);
               if (summary) Object.assign(entry, summary);
+            }
+            if (wanted) {
+              if (buf.length > MAX_BODY_READ_BYTES) {
+                capture!.omit(entry, `the response is ${buf.length} bytes — over the ${MAX_BODY_READ_BYTES}-byte read limit`);
+              } else {
+                capture!.record(entry, buf, contentType);
+              }
             }
           })
           .catch(() => {
             // No body (204/redirect/HEAD), or it was already consumed — the
             // header byte count (if any) still stands.
+            if (wanted) capture!.omit(entry, `no response body could be read${entry.status != null ? ` (status ${entry.status})` : ""}`);
           });
         d.pending.push(p);
       }
@@ -1060,9 +1338,24 @@ export class BrowserSession {
  * A router for `mockApi`, validated up front; none for an absent or empty list.
  * Anything else that isn't a list of stubs throws (never silently ignored).
  */
-function mockRouter(mockApi: unknown): MockRouter | undefined {
+function mockRouter(mockApi: unknown, baseDir: string): MockRouter | undefined {
   if (mockApi == null || (Array.isArray(mockApi) && mockApi.length === 0)) return undefined;
-  return new MockRouter(compileMocks(mockApi));
+  return new MockRouter(compileMocks(mockApi, { baseDir }));
+}
+
+/** URL → pathname, for a message. */
+function pathOf(url: string): string {
+  try {
+    return new URL(url).pathname;
+  } catch {
+    return url;
+  }
+}
+
+/** A body capture for `captureBodies`, validated up front; none for an absent or empty list. */
+function bodyCapture(patterns: unknown): BodyCapture | undefined {
+  if (patterns == null || (Array.isArray(patterns) && patterns.length === 0)) return undefined;
+  return new BodyCapture(compileBodyPatterns(patterns));
 }
 
 /** Replace `${ENV_VAR}` in an action's text with process.env values. */

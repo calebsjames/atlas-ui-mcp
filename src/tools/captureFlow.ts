@@ -49,6 +49,7 @@ export async function captureFlow(
     loginAs?: string;
     viewport?: { width: number; height: number };
     mockApi?: ApiMock[];
+    captureBodies?: string[];
   },
   session: BrowserSession,
   routeAnalyzer: RouteAnalyzer,
@@ -153,6 +154,7 @@ export async function captureFlow(
     loginAs: args.loginAs,
     viewport: args.viewport,
     mockApi: args.mockApi,
+    captureBodies: args.captureBodies,
   });
   const stepResults = flow.steps;
 
@@ -187,7 +189,10 @@ export async function captureFlow(
         stoppedEarly,
         stepsCompleted: `${completed}/${resolved.length}`,
         ...(flow.mockApi ? { mockApi: flow.mockApi } : {}),
+        ...(flow.captureBodies ? { captureBodies: flow.captureBodies } : {}),
         signedInAs: flow.signedInAs,
+        ...(flow.reloggedIn ? { reloggedIn: true, reloginReason: flow.reloginReason } : {}),
+        ...(flow.stillSignedOut ? { stillSignedOut: true, warning: flow.warning } : {}),
         steps: summaries,
       },
       null,

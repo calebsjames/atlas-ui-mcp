@@ -375,3 +375,92 @@ test("verify_data_flow and render_component take mockApi: the stubbed call is ma
     await fs.rm(root, { recursive: true, force: true });
   }
 });
+
+// ── a stub's body from a file (ECS-715) ───────────────────────────────────
+// An 11 KB payload was pasted into every capture_flow call. `jsonFile` /
+// `bodyFile` name a file under the workspace root instead.
+
+test("jsonFile / bodyFile serve a stub's body from a file under the workspace root", async () => {
+  await withFixture(async ({ session, app, out }) => {
+    const catalog = { items: Array.from({ length: 150 }, (_, i) => ({ id: i, sku: `SKU-${i}`, irons: ["5i", "6i", "7i"], note: "x".repeat(40) })) };
+    await fs.mkdir(path.join(out, "mocks"), { recursive: true });
+    await fs.writeFile(path.join(out, "mocks", "catalog.json"), "﻿" + JSON.stringify(catalog, null, 2));
+    assert.ok(JSON.stringify(catalog).length > 11_000, "a payload too big to paste per call");
+
+    const r = await session.capture(`${app}/`, {
+      requireAuth: false,
+      mockApi: [{ path: "/orders/catalog", jsonFile: "mocks/catalog.json" }],
+    });
+    assert.equal(results(r.title)["/orders/catalog"], `200 ${JSON.stringify(catalog)}`);
+    const call = r.requests.find((q) => q.url.endsWith("/orders/catalog") && q.method === "GET");
+    assert.deepEqual([call?.mocked, call?.rowCount], [true, 150]);
+    assert.deepEqual(r.mockApi?.mocks, [{ method: "GET", path: "/orders/catalog", status: 200, hits: 1, file: "mocks/catalog.json" }]);
+
+    await fs.writeFile(path.join(out, "mocks", "export.csv"), "id,sku\n1,SKU-1\n");
+    const csv = await session.capture(`${app}/`, {
+      requireAuth: false,
+      mockApi: [{ path: "/orders/catalog", status: 201, bodyFile: path.join(out, "mocks", "export.csv") }],
+    });
+    assert.equal(results(csv.title)["/orders/catalog"], "201 id,sku\n1,SKU-1\n", "an absolute path inside the root is accepted");
+  });
+});
+
+test("a mock file outside the workspace root, missing, or not JSON is refused before the browser starts", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "atlas-mock-root-"));
+  const elsewhere = await fs.mkdtemp(path.join(os.tmpdir(), "atlas-mock-else-"));
+  try {
+    await fs.writeFile(path.join(elsewhere, "secret.json"), '{"secret":true}');
+    await fs.writeFile(path.join(root, "broken.json"), "{ not json");
+    await fs.writeFile(path.join(root, "ok.json"), '{"ok":true}');
+    await fs.symlink(path.join(elsewhere, "secret.json"), path.join(root, "link.json"));
+    const compile = (stub: Record<string, unknown>) => compileMocks([{ path: "/x", ...stub }], { baseDir: root });
+
+    assert.equal(compile({ jsonFile: "ok.json" })[0].body, '{"ok":true}');
+    assert.equal(compile({ jsonFile: "./sub/../ok.json" })[0].headers["content-type"], "application/json");
+    assert.equal(compile({ bodyFile: "broken.json" })[0].body, "{ not json", "bodyFile serves the file as-is");
+
+    const outside = /resolves outside the workspace root .* must be inside it/;
+    assert.throws(() => compile({ jsonFile: `../${path.basename(elsewhere)}/secret.json` }), outside);
+    assert.throws(() => compile({ jsonFile: path.join(elsewhere, "secret.json") }), outside);
+    assert.throws(() => compile({ bodyFile: "/etc/hosts" }), outside);
+    assert.throws(() => compile({ jsonFile: "link.json" }), outside, "a symlink that leaves the root is refused");
+    assert.throws(() => compile({ jsonFile: "nope.json" }), /mockApi\[0\]: "jsonFile" file not found: .*nope\.json \(relative paths resolve against the workspace root/);
+    assert.throws(() => compile({ jsonFile: "broken.json" }), /"jsonFile" broken\.json is not valid JSON .*Use "bodyFile"/);
+    assert.throws(() => compile({ jsonFile: 7 }), /"jsonFile" must be a file path \(string\)/);
+    assert.throws(() => compile({ json: {}, jsonFile: "ok.json" }), /give one of "json", "jsonFile", "body" or "bodyFile", not "json" and "jsonFile"/);
+    assert.throws(() => compile({ file: "ok.json" }), /unknown key "file" — did you mean "jsonFile"\?/);
+    assert.throws(() => compileMocks([{ path: "/x", jsonFile: "ok.json" }]), /needs a workspace root/);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+    await fs.rm(elsewhere, { recursive: true, force: true });
+  }
+});
+
+test("check_page takes a jsonFile stub through dispatch; a path outside the root is an error result", async () => {
+  const apiServer = await api();
+  const appServer = await listen((_req, res) => {
+    res.writeHead(200, { "content-type": "text/html" });
+    res.end(appPage(apiServer.base));
+  });
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "atlas-mock-file-tool-"));
+  await fs.writeFile(path.join(root, "package.json"), JSON.stringify({ dependencies: { vue: "^3" } }));
+  await fs.writeFile(path.join(root, "catalog.json"), JSON.stringify({ data: [1, 2, 3, 4] }));
+  const ctx = await toolContext(root, appServer.base);
+  type Res = { content: Array<{ text?: string }>; isError?: boolean };
+  try {
+    const res = (await dispatchToolCall("check_page", { url: "/", public: true, mockApi: [{ path: "/orders/catalog", jsonFile: "catalog.json" }] }, ctx)) as Res;
+    assert.ok(!res.isError, res.content[0].text);
+    const out = JSON.parse(res.content[0].text!);
+    assert.equal(out.mockApi.mocks[0].file, "catalog.json");
+    assert.equal(out.apiCalls.find((c: any) => c.path === "/orders/catalog").rowCount, 4);
+
+    const bad = (await dispatchToolCall("check_page", { url: "/", public: true, mockApi: [{ path: "/orders/catalog", jsonFile: "../../etc/passwd" }] }, ctx)) as Res;
+    assert.ok(bad.isError);
+    assert.match(bad.content[0].text!, /resolves outside the workspace root/);
+  } finally {
+    await ctx.browser.close();
+    await appServer.close();
+    await apiServer.close();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});

@@ -52,8 +52,15 @@ export function diagnostics(capture: CaptureResult) {
     ...(capture.viewport ? { viewport: capture.viewport } : {}),
     // With stubs in play, show which calls were stubbed (`mocked: true`) next
     // to the real ones, and what each stub matched.
-    ...(capture.mockApi ? { mockApi: capture.mockApi, apiCalls: toApiCalls(capture.requests) } : {}),
+    ...(capture.mockApi ? { mockApi: capture.mockApi } : {}),
+    // Asked-for response bodies ride on the same list (`responseBody`).
+    ...(capture.captureBodies ? { captureBodies: capture.captureBodies } : {}),
+    ...(capture.mockApi || capture.captureBodies ? { apiCalls: toApiCalls(capture.requests) } : {}),
     ...(capture.signedInAs ? { signedInAs: capture.signedInAs } : {}),
+    // The session had expired: this call signed in again and retried once.
+    ...(capture.reloggedIn ? { reloggedIn: true, reloginReason: capture.reloginReason } : {}),
+    // The login works but the page still looks signed out (e.g. a role without access).
+    ...(capture.stillSignedOut ? { stillSignedOut: true, warning: capture.warning } : {}),
     screenshotPath: capture.screenshotPath,
   };
 }

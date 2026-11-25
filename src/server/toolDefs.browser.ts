@@ -19,12 +19,16 @@ const ACTION_ITEM_SCHEMA = {
       type: "string",
       description:
         'CSS or Playwright selector, e.g. "#email", "text=Submit", "role=button[name=\\"Save\\"]". ' +
-        "Visible matches are preferred automatically — hidden duplicates (responsive variants) are skipped, so no `:visible` suffix is needed.",
+        "Visible matches are preferred automatically — hidden duplicates (responsive variants) are skipped, so no `:visible` suffix is needed. " +
+        'A click/fill/select/check that times out on a disabled target says so: for `aria-disabled="true"` the error names the alternative ' +
+        '({"type": "press", "selector": …, "key": "Space"} — press does not wait for enabled), or the control is disabled by design and that is the finding.',
     },
     within: {
       type: "string",
       description:
-        'Optional row/card scoping: restrict `selector` to the innermost container that also contains this text — e.g. selector "button:has-text(\\"Open Kit\\")" with within "RK-003" clicks that row\'s button, no container CSS needed.',
+        'Optional row/card scoping: restrict `selector` to the innermost container that also contains this TEXT — e.g. selector "button:has-text(\\"Open Kit\\")" with within "RK-003" clicks that row\'s button, no container CSS needed. ' +
+        '`selector` may be any CSS or Playwright selector here ("text=Open Kit", "role=button[name=\\"Delete\\"]", "button >> nth=0"). ' +
+        '`within` is text, not a selector ("text=RK-003" is read as the text RK-003); to scope by a container selector instead, write it with an engine prefix or a >> chain: "css=tr.selected", "tr:has-text(\\"RK-003\\") >> nth=0".',
     },
     text: { type: "string", description: "Value to type (fill) or option to choose (select)." },
     key: { type: "string", description: 'Key for press, e.g. "Enter".' },
@@ -61,7 +65,8 @@ const MOCK_API_SCHEMA = {
     "API stubs for THIS call only. A page request (xhr/fetch, or a URL under /api/ — the same calls `apiCalls` lists) that matches a stub is " +
     "answered with it; everything else reaches the real API. The stubs are removed when the call ends, even on error. Use it to see a screen " +
     "whose endpoint or field the server doesn't serve yet. Stubbed calls carry `mocked: true` in `apiCalls`; `mockApi.unmatched` lists any stub " +
-    "no request matched (with `nearMisses`: observed calls that look like what it meant). Cross-origin calls work (CORS is handled); while stubs are installed every CORS preflight is answered by the browser driver and the HTTP cache is off.",
+    "no request matched (with `nearMisses`: observed calls that look like what it meant). Cross-origin calls work (CORS is handled); while stubs are installed every CORS preflight is answered by the browser driver and the HTTP cache is off. " +
+    "For a large body, keep it in a file and name it with `jsonFile` instead of pasting it into every call. To get a real response's shape to build a stub from, pass `captureBodies`.",
   items: {
     type: "object",
     properties: {
@@ -74,11 +79,37 @@ const MOCK_API_SCHEMA = {
       query: { type: "object", description: 'Query params that must be present with these values, e.g. {"status": "open"}.' },
       status: { type: "number", description: "Response status (default 200)." },
       json: { description: "JSON response body (any JSON value; content-type application/json)." },
+      jsonFile: {
+        type: "string",
+        description:
+          'JSON response body read from a file, instead of `json`: a path relative to the workspace root, e.g. ".atlas-ui/mocks/catalog.json". Refused if it resolves outside the workspace root, is missing, or is not valid JSON (checked before the browser starts).',
+      },
       body: { type: "string", description: "Raw response body instead of json (content-type text/plain unless headers set one)." },
+      bodyFile: {
+        type: "string",
+        description:
+          "Raw response body read from a file, instead of `body` (same path rule as jsonFile; content-type by extension: .json, .html, .xml, .csv, else text/plain, unless headers set one).",
+      },
       headers: { type: "object", description: "Extra response headers." },
     },
     required: ["path"],
   },
+};
+
+// Opt-in response bodies, shared by check_page, render_component, verify_data_flow and capture_flow.
+const CAPTURE_BODIES_SCHEMA = {
+  type: "array",
+  items: { type: "string" },
+  description:
+    "Opt-in RESPONSE BODIES for this call (off unless passed): path patterns, matched like `mockApi` paths — the pathname as `apiCalls` shows it, " +
+    'exact "/orders/catalog", glob "/orders/*" or "**/orders/catalog", regex "re:^/orders/\\\\d+$", or a full URL; optionally prefixed with a method ("POST /orders"). ' +
+    "Each matching API call's `apiCalls` entry carries `responseBody`: `{json}` (parsed) when the body is JSON, else `{text}`, with `contentType`. " +
+    "Use it to copy the real response's shape into a `mockApi` stub instead of guessing it. Bounded: 16000 chars per body, 48000 per call, 20 bodies per call. " +
+    "A JSON body over the cap is shortened but stays valid JSON with the real shape (long arrays keep their first rows, long strings their head) and carries " +
+    "`truncated: true`, `originalBytes` and `truncation` (what was cut, by JSON path, e.g. \"$.items: kept 3 of 1578 rows\"). Values under token/password/secret-like keys and JWTs " +
+    'are replaced with "[redacted]" (`redacted`: how many). A body that is not returned says why in `responseBody.omitted` (binary, empty, budget used up). ' +
+    "A body-carrying entry also has `query` when the URL had one, and is never dropped by the 30-call cap on `apiCalls`. The result's `captureBodies` reports what each pattern matched " +
+    "and `unmatched` patterns with `nearMisses`. Bodies can hold personal data: name only the calls you need.",
 };
 
 // Per-call viewport and login identity, shared by every runtime tool.
@@ -116,7 +147,7 @@ export const BROWSER_TOOLS = [
   {
     name: "render_component",
     description:
-      "Render a catalog component in the running app and return a screenshot plus runtime diagnostics (console errors, uncaught exceptions, failed network requests). Resolves the component to its URL automatically via the route map — just name the component you changed. A component no route renders (a modal, a tab, a composable via the components that consume it) is reached through its nearest ROUTED ancestor: the result's `mountPath` lists each hop with the guard that mounts it, URL-query and section-click reveals are applied automatically, and when a hop sits behind app state (a modal's `v-if`) `targetMounted` is false and `captureFlowSteps` is a ready-to-run capture_flow plan (activator clicks found in the template; `<TODO>` where none is). Use this to visually confirm a change actually works. Requires the dev server to be running.",
+      "Render a catalog component in the running app and return a screenshot plus runtime diagnostics (console errors, uncaught exceptions, failed network requests). Resolves the component to its URL automatically via the route map — just name the component you changed. A component no route renders (a modal, a tab, a composable via the components that consume it) is reached through its nearest ROUTED ancestor: the result's `mountPath` lists each hop with the guard that mounts it, URL-query and section-click reveals are applied automatically, and when a hop sits behind app state (a modal's `v-if`) `targetMounted` is false and `captureFlowSteps` is a ready-to-run capture_flow plan (activator clicks found in the template; `<TODO>` where none is). Use this to visually confirm a change actually works. `mockApi` stubs API responses for this call (`jsonFile` for a body kept in a file); `captureBodies` (opt-in) returns the response bodies of the API calls you name under `apiCalls[].responseBody`. If the session had expired, the call signs in again once and retries (`reloggedIn: true`; `stillSignedOut: true` + `warning` when the login works but the page still looks signed out). Requires the dev server to be running.",
     inputSchema: {
       type: "object",
       properties: {
@@ -160,6 +191,7 @@ export const BROWSER_TOOLS = [
         viewport: VIEWPORT_SCHEMA,
         loginAs: LOGIN_AS_SCHEMA,
         mockApi: MOCK_API_SCHEMA,
+        captureBodies: CAPTURE_BODIES_SCHEMA,
         measure: MEASURE_SCHEMA,
       },
       required: [],
@@ -168,7 +200,7 @@ export const BROWSER_TOOLS = [
   {
     name: "check_page",
     description:
-      "Navigate to any URL (absolute, or a path relative to the dev server) and return a screenshot plus runtime diagnostics: console errors, uncaught exceptions, and failed network calls. Optional per-call `viewport` (responsive checks), `loginAs` (another role from browser.profiles), `measure` (read-only boxes / overflow / computed styles for selectors) and `mockApi` (stub API responses for this call). `signedInAs` reports which account the browser used (login email + the app's own user, roles, impersonation). The 'did my change break anything' workhorse — call it after editing to confirm the page still renders clean. Requires the dev server to be running.",
+      "Navigate to any URL (absolute, or a path relative to the dev server) and return a screenshot plus runtime diagnostics: console errors, uncaught exceptions, and failed network calls. Optional per-call `viewport` (responsive checks), `loginAs` (another role from browser.profiles), `measure` (read-only boxes / overflow / computed styles for selectors), `mockApi` (stub API responses for this call; a stub can read its body from a file with `jsonFile`) and `captureBodies` (opt-in: the response bodies of the API calls you name, on `apiCalls[].responseBody`). `signedInAs` reports which account the browser used (login email + the app's own user, roles, impersonation). If the session had expired, the call signs in again once and retries; the result then carries `reloggedIn: true` and `reloginReason`. If the login works but the page still looks signed out (typically a role without access to those calls), the result comes back complete with `stillSignedOut: true` and a `warning`, and that session does not sign in again for it until reset_login. The 'did my change break anything' workhorse — call it after editing to confirm the page still renders clean. Requires the dev server to be running.",
     inputSchema: {
       type: "object",
       properties: {
@@ -194,6 +226,7 @@ export const BROWSER_TOOLS = [
         viewport: VIEWPORT_SCHEMA,
         loginAs: LOGIN_AS_SCHEMA,
         mockApi: MOCK_API_SCHEMA,
+        captureBodies: CAPTURE_BODIES_SCHEMA,
         measure: MEASURE_SCHEMA,
       },
       required: ["url"],
@@ -202,7 +235,7 @@ export const BROWSER_TOOLS = [
   {
     name: "verify_data_flow",
     description:
-      "Render a component's route and check the REAL network traffic against the endpoints that static analysis (get_data_flow, including child components and stores) predicts. Matching is method-aware. The key output is `unexpectedApiCalls` — observed calls that map to NO predicted endpoint, i.e. real source-vs-runtime drift (dynamic URLs, app-level fetches, or genuine divergence). `verdict` is 'confirmed' when every observed call is accounted for. Pass `actions` to drive interactions (fill/click/...) before the network is read — that's how predicted MUTATION endpoints (POST/PUT/DELETE) get exercised and verified. A target no route renders (modal, tab, composable) is reached through its nearest routed ancestor (`mountPath`); the ancestor's own predicted traffic is then expected too, and `targetEndpoints` reports how many of the TARGET's predicted endpoints were observed. When the target sits behind app state and no `actions` are given, it returns verdict `gated` with `captureFlowSteps` instead of navigating — pass those clicks as `actions`. Requires the dev server to be running.",
+      "Render a component's route and check the REAL network traffic against the endpoints that static analysis (get_data_flow, including child components and stores) predicts. Matching is method-aware. The key output is `unexpectedApiCalls` — observed calls that map to NO predicted endpoint, i.e. real source-vs-runtime drift (dynamic URLs, app-level fetches, or genuine divergence). `verdict` is 'confirmed' when every observed call is accounted for. `captureBodies` (opt-in) returns the response bodies of the API calls you name under `apiCalls[].responseBody`. Pass `actions` to drive interactions (fill/click/...) before the network is read — that's how predicted MUTATION endpoints (POST/PUT/DELETE) get exercised and verified. A target no route renders (modal, tab, composable) is reached through its nearest routed ancestor (`mountPath`); the ancestor's own predicted traffic is then expected too, and `targetEndpoints` reports how many of the TARGET's predicted endpoints were observed. When the target sits behind app state and no `actions` are given, it returns verdict `gated` with `captureFlowSteps` instead of navigating — pass those clicks as `actions`. Requires the dev server to be running.",
     inputSchema: {
       type: "object",
       properties: {
@@ -240,6 +273,7 @@ export const BROWSER_TOOLS = [
         viewport: VIEWPORT_SCHEMA,
         loginAs: LOGIN_AS_SCHEMA,
         mockApi: MOCK_API_SCHEMA,
+        captureBodies: CAPTURE_BODIES_SCHEMA,
       },
       required: ["name"],
     },
@@ -247,7 +281,7 @@ export const BROWSER_TOOLS = [
   {
     name: "capture_flow",
     description:
-      "Drive a multi-step user flow against a SINGLE persistent page and screenshot each step. Each step can navigate (component/route/url/section) and/or run interactions (click, fill, select, press, check, hover, waitFor, scroll, wait, and the read-only measure) — so you can log in, fill a form, submit, and verify the next screen as one flow. Each call opens a FRESH page (auth carries over; a previous call's open modal does not); `viewport` and `loginAs` (a browser.profiles role) apply to the whole flow, and a step's `viewport` resizes mid-flow. State (cookies, form values, SPA route) carries across steps. Each step reports the API calls it triggered ({method, path, status}) so you can confirm a click actually fired its mutation. Actions include `drag` (real pointer drag: sliders, sortable lists, HTML5 drag-and-drop) and `upload` (file inputs and file-chooser buttons; a bundled JPEG/PNG/MP4 when no `files` are given). `mockApi` stubs API responses for the whole flow (e.g. an endpoint the server doesn't have yet). The result's `signedInAs` says which account the browser used (login email + the app's own user, roles, impersonation). Aggregates diagnostics into a single pass/fail; on a failed action it screenshots the broken state and stops. Requires the dev server to be running.",
+      "Drive a multi-step user flow against a SINGLE persistent page and screenshot each step. Each step can navigate (component/route/url/section) and/or run interactions (click, fill, select, press, check, hover, waitFor, scroll, wait, and the read-only measure) — so you can log in, fill a form, submit, and verify the next screen as one flow. Each call opens a FRESH page (auth carries over; a previous call's open modal does not); `viewport` and `loginAs` (a browser.profiles role) apply to the whole flow, and a step's `viewport` resizes mid-flow. State (cookies, form values, SPA route) carries across steps. Each step reports the API calls it triggered ({method, path, status}) so you can confirm a click actually fired its mutation. Actions include `drag` (real pointer drag: sliders, sortable lists, HTML5 drag-and-drop) and `upload` (file inputs and file-chooser buttons; a bundled JPEG/PNG/MP4 when no `files` are given). `mockApi` stubs API responses for the whole flow (e.g. an endpoint the server doesn't have yet; a stub can read its body from a file with `jsonFile`). `captureBodies` (opt-in) adds the response body of the API calls you name to each step's `apiCalls` (`responseBody`), so a stub can copy the real shape. The result's `signedInAs` says which account the browser used (login email + the app's own user, roles, impersonation). If the session had expired when the flow started, it signs in again once and restarts from its first step (`reloggedIn: true`, `reloginReason`). If the login works but the page still looks signed out (typically a role without access to those calls), the result comes back complete with `stillSignedOut: true` and a `warning`, and that session does not sign in again for it until reset_login. A click that times out on a disabled control says so and names the alternative; `within` works with Playwright-syntax selectors. Aggregates diagnostics into a single pass/fail; on a failed action it screenshots the broken state and stops. Requires the dev server to be running.",
     inputSchema: {
       type: "object",
       properties: {
@@ -294,6 +328,7 @@ export const BROWSER_TOOLS = [
         viewport: VIEWPORT_SCHEMA,
         loginAs: LOGIN_AS_SCHEMA,
         mockApi: MOCK_API_SCHEMA,
+        captureBodies: CAPTURE_BODIES_SCHEMA,
       },
       required: ["steps"],
     },
@@ -301,7 +336,7 @@ export const BROWSER_TOOLS = [
   {
     name: "reset_login",
     description:
-      "Recover the browser's authenticated session in-place: re-reads .atlas-ui.json (so a browser.login block added or fixed after server startup takes effect — no restart needed), clears cookies/storage and any stuck login error, then (by default) re-runs the configured login flow immediately. Use this when authed runtime tools (render_component/check_page/capture_flow on protected routes) start failing with a login error, or right after adding/changing browser.login config. No-op with a note if no browser.login is configured even after the re-read. Public routes never need this; pass \"public\": true on those tools to skip login entirely.",
+      "Recover the browser's authenticated session in-place: re-reads .atlas-ui.json (so a browser.login block added or fixed after server startup takes effect — no restart needed), clears cookies/storage and any stuck login error, then (by default) re-runs the configured login flow immediately. Use this when authed runtime tools (render_component/check_page/capture_flow on protected routes) start failing with a login error, or right after adding/changing browser.login config. An expired session no longer needs it: an authed call that finds the session signed out signs in again once by itself and reports `reloggedIn: true`; call reset_login when a call fails with 'the automatic re-login failed', or when a result carries `stillSignedOut: true` and you believe the session (not the account's access) is the problem — reset_login also re-enables automatic re-login for that profile. No-op with a note if no browser.login is configured even after the re-read. Public routes never need this; pass \"public\": true on those tools to skip login entirely.",
     inputSchema: {
       type: "object",
       properties: {

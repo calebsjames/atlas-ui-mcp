@@ -252,7 +252,9 @@ Powered by Playwright/Chromium. They require your dev server to be running and d
 - **Navigation settles on a quiet window**, not `networkidle`: `load`, then a bounded window (≤10 s) with no short-lived request in flight. SSE / websocket streams, long-polls and `browser.idleIgnore` URLs never hold it open, so an app with a realtime stream doesn't burn a 30 s timeout per call. `waitUntil` (`quiet` | `load` | `domcontentloaded` | `networkidle`) overrides it; a stalled wait lists the requests still in flight.
 - **A fresh page per call**, in the same browser context: cookies, localStorage and IndexedDB carry over, `sessionStorage` (where many SPAs keep their token) is carried from one page to the next, and a previous call's open modal can't swallow this call's clicks.
 - **Per call:** `viewport {width,height}` (that call only), `loginAs` (a `browser.profiles` role, own context), on `check_page` / `render_component` a read-only `measure: [selectors]`, and on `check_page` / `render_component` / `verify_data_flow` / `capture_flow` **`mockApi`** — API stubs for that call only (see [Stubbing the API](#stubbing-the-api-mockapi)).
+- **Response bodies on request:** `captureBodies: [path patterns]` on the same four tools puts the response body of the API calls you name on their `apiCalls` entry (see [Reading response bodies](#reading-response-bodies-capturebodies)). Off unless passed.
 - **Every result says who the browser was signed in as** (`signedInAs`, see [below](#who-the-browser-is-signed-in-as-signedinas)), so "I see different data than the preview" can be ruled in or out as a different account.
+- **An expired session signs itself in again.** When an authenticated call's first navigation finds the session signed out, the call signs in again once, retries once, and reports `reloggedIn: true`; when the login works and the page still looks signed out, the result comes back with `stillSignedOut: true` and a `warning` (see [Automatic re-login](#automatic-re-login)).
 
 ### `render_component`
 Render a catalog component in the live app and return a **screenshot plus runtime diagnostics** (console errors, uncaught exceptions, failed network requests). Resolves `component` → URL via the route map; or pass a raw `route`. Pass `params` for dynamic segments (e.g. `{"id": "123"}`). The screenshot comes back as an image the agent can look at. For a component that lives inside a one-route shell, pass `section` (see `get_section_map`) — or just name the section's child `component` — and it auto-reveals that section (query-append or activator click) before the shot, reporting how under `viewSection`.
@@ -278,6 +280,10 @@ Drive a multi-step user flow against **one page** (fresh for each call) and scre
 Tip: `get_component_detail` exposes each component's `testIds` and `formFields` (with ready-made selectors) — build your steps from those instead of reading source.
 
 Each step's `actions` run in order. Supported action `type`s: `click`, `fill`, `select`, `check`, `uncheck`, `hover`, `press`, `waitFor`, `scroll` (into view, or by `x`/`y`), `wait` (`ms`), the read-only `measure` (bounding box, scroll/client sizes, overflow and computed `properties` → the step's `measurements`), `drag` and `upload` (below). Selectors accept CSS or Playwright engines (`#email`, `text=Submit`, `role=button[name="Save"]`). `fill`/`select` use `text`; `press` uses `key`. A step's `viewport` resizes the page mid-flow.
+
+**`within`** scopes `selector` to one row or card: `{ "type": "click", "selector": "text=Open Kit", "within": "RK-003" }` clicks the Open Kit control in the innermost element that contains both the text `RK-003` and a match for the selector. `selector` may be CSS or any Playwright selector (`text=…`, `role=button[name="Delete"]`, `button >> nth=0`). `within` is **text** (case-insensitive substring; `text=RK-003` is read as that text). To scope by a container selector instead, write `within` with an engine prefix or a `>>` chain: `"css=tr.selected"`, `"tr:has-text(\"RK-003\") >> nth=0"`. When no element holds both, the timeout error says so and shows that form.
+
+**Disabled targets.** Playwright waits for a control to be enabled before `click` / `fill` / `select` / `check` / `uncheck`, and it honours `aria-disabled="true"` (on the element or an ancestor) as well as the native `disabled` attribute. When one of those actions times out on a disabled target the error says which kind it is. For `aria-disabled` it also names the alternative: the control is disabled by design (a precondition is not met — that is the finding), or, if the app still handles activation on it, `{ "type": "press", "selector": "…", "key": "Space" }` (or `"Enter"`), which does not wait for enabled. A natively disabled control cannot be activated at all.
 
 **`drag`** — `{ "type": "drag", "selector": "#chip-3", "toSelector": "#chip-1" }` drops on the target's centre; add `"to": {"x", "y"}` to drop at that offset from the target's top-left, or give only `"to"` to drag by an offset from the source's centre (`{ "type": "drag", "selector": "#thumb", "to": {"x": 120, "y": 0} }` scrubs a slider). It is real pointer input — press, move in `steps` (default 12), release — so it works for pointer-driven widgets (sliders, sortable lists) **and** native HTML5 drag-and-drop (`draggable` + `dragstart`/`drop` with `dataTransfer`). The source is scrolled into view; a drop point outside the viewport is an error, not a silent miss. `within` scopes the source.
 
@@ -320,12 +326,49 @@ A screen built before its server part exists can't be seen with data: the endpoi
 | `method` | Default `GET`; `"*"` matches any. |
 | `query` | Params that must be present with these values (others may be too). |
 | `status` | Default 200. |
-| `json` / `body` | JSON body (content-type `application/json`) or raw string (`text/plain` unless `headers` sets one). One or the other. |
+| `json` / `body` | JSON body (content-type `application/json`) or raw string (`text/plain` unless `headers` sets one). |
+| `jsonFile` / `bodyFile` | The same, read from a file: a path relative to the workspace root (e.g. `".atlas-ui/mocks/catalog.json"`). `jsonFile` is parsed and must be valid JSON; `bodyFile` is served as-is with a content-type by extension (`.json`, `.html`, `.xml`, `.csv`, else `text/plain`). Give one of the four body fields per stub. |
 | `headers` | Extra response headers. |
 
 Only the requests `apiCalls` counts are matched (xhr/fetch, or a URL under `/api/`), so a stub never intercepts the page, its scripts or images. The result carries `mockApi: { mocks: [{method, path, status, hits}], unmatched?, warning? }`; stubbed calls carry **`mocked: true`** in `apiCalls` (on `check_page` / `render_component`, `apiCalls` is added to the result whenever `mockApi` is passed) and in `verify_data_flow`'s matched/unexpected lists, with the same body summary (`rowCount`, …) as a real response. A stub **no request matched** is listed under `unmatched` with `nearMisses` — observed calls that look like what it meant (same path with another method or query, or the same last segment under another prefix). Bad stubs fail before the browser starts, naming every problem; an unknown key gets a did-you-mean (`url` → `path`, `response` → `json`). Arguments `mocks` / `stubs` are accepted as aliases.
 
+**A body from a file.** A large payload doesn't have to be pasted into every call: write it once under the workspace and name it — `{ "path": "/orders/catalog", "jsonFile": ".atlas-ui/mocks/catalog.json" }`. The path resolves against the workspace root and is **refused if it resolves outside it** (lexically, or through a symlink), so a stub can't serve an arbitrary file from the machine to the page. A missing file, invalid JSON in a `jsonFile`, a file over 5 MB, or two body fields on one stub are reported with the other stub problems before the browser starts. The `mockApi.mocks[]` entry of such a stub carries `file`.
+
 Cross-origin APIs work: while any stub is installed, Playwright answers every CORS preflight itself and adds the allow-origin headers to a stubbed response. Two side effects for that call only: the HTTP cache is off, and a real CORS misconfiguration on the live API won't show (its preflights are answered too).
+
+### Reading response bodies (`captureBodies`)
+
+`apiCalls` reports each call's status, size and row count, not its body. To build a stub shaped like the real response (plus the field the server doesn't serve yet), ask for the body instead of guessing it: `captureBodies` on `check_page`, `render_component`, `verify_data_flow` and `capture_flow` (whole flow) takes path patterns in the same forms as a `mockApi` `path`, each optionally prefixed with a method.
+
+```jsonc
+"captureBodies": ["/orders/catalog", "**/customers/*", "POST /orders"]
+```
+
+Each matching API call's `apiCalls` entry then carries `responseBody` (on `check_page` / `render_component` / `verify_data_flow`, `apiCalls` is added to the result whenever `captureBodies` is passed; on `capture_flow` it is on each step):
+
+```jsonc
+{ "method": "GET", "path": "/orders/catalog", "status": 200, "bytes": 184211, "rowCount": 1578, "rowsFrom": "items",
+  "responseBody": {
+    "json": { "total": 1578, "items": [ { "id": 0, "sku": "SKU-0" }, { "id": 1, "sku": "SKU-1" } /* …3 more rows */ ] },
+    "contentType": "application/json",
+    "truncated": true, "originalBytes": 184211,
+    "truncation": ["$.items: kept 5 of 1578 rows"] } }
+```
+
+| `responseBody` field | Meaning |
+|-------|-------------|
+| `json` | The parsed body, when it is JSON. |
+| `text` | The body as text, when it is not JSON (or JSON that could not be shortened under the cap). |
+| `contentType` | The response's content-type, without parameters. |
+| `truncated`, `originalBytes`, `truncation` | Present when the body was shortened: `true`, the full size in bytes, and what was cut by JSON path. |
+| `redacted` | How many credential-looking values were replaced with `"[redacted]"`. |
+| `omitted` | Why there is no body: binary content-type, empty body, over the 5 MB read limit, or the call's budget is used up. |
+
+- **Off unless passed.** Without `captureBodies` no body is read beyond the existing shape summary and the output is unchanged.
+- **Bounded.** 16,000 characters per body, 48,000 per call, 20 bodies per call. A JSON body over the cap is shortened structurally — long arrays keep their first rows (5, then 3, 2, 1 as needed), long strings their head — so it is still valid JSON with the real shape, never cut mid-token. Only if that is not enough is the serialized text cut (`text`, with a `truncation` note saying it is not parseable).
+- **Not lost to the list's limits.** `apiCalls` dedupes by method + path and stops at 30 calls; a body-carrying entry is kept apart from both, dedupes by method + path + query (its `query` field holds the query string), and a repeat of the same URL is listed again only when its body differs.
+- **Secrets stay out.** String values under keys that look like credentials (`token`, `password`, `secret`, `authorization`, `apiKey`, `cookie`, …) and any JWT are replaced with `"[redacted]"`. The login pre-step's traffic is never captured. Bodies can still hold personal data — name only the calls you need.
+- The result carries `captureBodies: { patterns: [{pattern, matched}], bodies, chars, limits, truncated?, unmatched?, warning? }`; a pattern no API call matched is listed under `unmatched` with `nearMisses`, like an unmatched stub. Aliases `bodies` / `responseBodies`.
 
 ### Who the browser is signed in as (`signedInAs`)
 
@@ -372,6 +415,7 @@ Add a `browser` block to `.atlas-ui.json` (all fields optional — these are the
 | `idleIgnore` | URL patterns (substring, or glob with `*`) that never hold a navigation's quiet window open. |
 | `quietMs` / `quietMaxMs` / `longPollMs` / `navigationTimeoutMs` | Quiet-window tunables (defaults 500 / 10000 / 8000 / 30000). |
 | `profiles` | Named extra logins (`{ "coach": { …login block… } }`) selected per call with `loginAs`. |
+| `autoRelogin` | Sign in again when an authenticated call finds the session signed out (default `true`; see [Automatic re-login](#automatic-re-login)). |
 
 First-time setup downloads the browser binary:
 
@@ -408,6 +452,23 @@ If your app is behind a login, add a `login` block. The session authenticates **
 | `successUrlIncludes` | Or confirm the URL changed to include this substring. |
 
 The env vars must be visible to the MCP server process (set them in the `env` block of your `mcp.json` server entry). On login failure the session tears down and the next call retries, rather than silently running unauthenticated. Filled values are reported by length, so credentials never appear in tool output.
+
+#### Automatic re-login
+
+Sessions expire during a long agent turn, and a logged-out browser used to show only as a failed click until someone called `reset_login`. Now every authenticated call (`check_page`, `render_component`, `verify_data_flow`, `capture_flow`, `inspect_rendered_page`) checks its **first navigation** once for a signed-out session:
+
+- the page ended on the login page (`login.url`) although the call asked for another URL, or
+- the navigation's real API calls answered **401** — all of them, or two or more that are at least half of them (calls a `mockApi` stub answered don't count).
+
+On either signal the profile's browser context is dropped (as `reset_login` does, so no stale cookie or token survives), the login flow runs again, and the call is retried **once** from the start. The result then carries `reloggedIn: true` and `reloginReason` (e.g. `"/orders ended on the login page (/login)"`); a flow restarts from its first step, before any of its actions ran.
+
+It never loops, and a working login never costs you the evidence:
+
+- **The login works but the page still looks signed out** (the retry shows the same signal). This is what a correctly signed-in role sees on a page that calls endpoints it has no access to, or that the app bounces it from. The call returns its normal result — screenshot, `apiCalls`, diagnostics — with `reloggedIn: true`, `reloginReason`, and **`stillSignedOut: true`** plus a **`warning`** saying the login worked, the likely causes (the account lacks access to these calls or this page; or the app is rejecting the session) and `reset_login` as the manual step. It is not retried.
+- **That session then stops signing in again.** Once a profile's re-login was followed by a still-signed-out page, later calls on that profile whose first navigation shows the signal report `stillSignedOut: true` and the `warning` without logging in (no `reloggedIn`), so a chronic page costs one login, not one per call. Calls without the signal carry neither field. The rule lasts until `reset_login` replaces that profile's session (or the server restarts); other profiles are unaffected.
+- **The login flow itself cannot complete:** the call fails with `The session was signed out and the automatic re-login failed: …`.
+
+It does not run for public calls (`"public": true`), for a call that asked for the login page itself, or right after the same call created the session; `loginAs` signs in again only that profile. The check needs the page's requests to have finished, so it is reliable with the default `waitUntil: "quiet"`; a session that expires in the middle of a flow (after its first navigation) is not retried. Set `browser.autoRelogin` to `false` to turn it off.
 
 > **SPA note:** each call gets a fresh page, but `sessionStorage` is snapshotted when a page is retired (and right after login) and seeded into the next page on the app's origin, so a token kept there survives. A failed login reports the URL and `<title>` it stopped on and saves a screenshot.
 
