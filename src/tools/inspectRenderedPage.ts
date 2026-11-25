@@ -77,7 +77,7 @@ export async function inspectRenderedPage(
     try {
       await session.navigate(page, url);
     } catch (err) {
-      // Signed out: the session signs in again and re-runs this (or reports it).
+      // Signed out: the session signs in again and re-runs this.
       if (err instanceof SignedOutError) throw err;
       // A slow/failed nav still leaves something to inspect; press on.
     }
@@ -188,6 +188,8 @@ export async function inspectRenderedPage(
     signedInAs: ReturnType<BrowserSession["signedInAs"]>;
     reloggedIn?: true;
     reloginReason?: string;
+    stillSignedOut?: true;
+    warning?: string;
   } = {
     url,
     framework: rendered.framework,

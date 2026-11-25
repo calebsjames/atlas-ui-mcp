@@ -59,15 +59,13 @@ interface DiagBuffers {
 }
 
 /**
- * An authenticated call's first navigation found the session signed out.
- * Not `final`: the caller signs in again and retries the call once. `final`:
- * that retry was still signed out — the message says so and nothing retries.
+ * An authenticated call's first navigation found the session signed out: the
+ * caller signs in again and retries the call once. Never thrown by that
+ * retry — a page that still looks signed out after a successful re-login is
+ * returned with a warning (`stillSignedOut`), not an error.
  */
 export class SignedOutError extends Error {
-  constructor(
-    readonly reason: string,
-    readonly final = false
-  ) {
+  constructor(readonly reason: string) {
     super(reason);
     this.name = "SignedOutError";
   }
@@ -79,8 +77,13 @@ interface AuthWatch {
   login: BrowserLoginConfig;
   /** diag.requests length when armed — the navigation's API calls start here. */
   mark: number;
-  /** This call already signed in again: a signed-out page now is final. */
-  final: boolean;
+  /**
+   * What a signed-out signal leads to: "relogin" (sign in again, retry once);
+   * "afterRelogin" (this call already did — warn, and mark the session);
+   * "futile" (an earlier re-login on this session did not clear the signal —
+   * warn without signing in again).
+   */
+  mode: "relogin" | "afterRelogin" | "futile";
 }
 
 /** What the app's storage said about the signed-in user, and when/where it was read. */
@@ -116,6 +119,13 @@ interface Profile {
   lastUrl: string | null;
   /** The app's signed-in user as last read from this profile's storage (for server_info). */
   identity: ObservedIdentity | null;
+  /**
+   * Set when an automatic re-login succeeded and the page STILL looked signed
+   * out (a role without access to those calls, typically). Until reset_login
+   * replaces this session, later calls report the signal as a warning and do
+   * not sign in again.
+   */
+  reloginFutile: boolean;
 }
 
 /** Options of a flow (`runFlow` / `runFlowDetailed`). */
@@ -136,6 +146,9 @@ export interface FlowResult {
   /** Set when the session was found signed out and the flow signed in again before its (retried) first navigation. */
   reloggedIn?: true;
   reloginReason?: string;
+  /** Set when the page still looks signed out although a re-login succeeded (see CaptureResult). */
+  stillSignedOut?: true;
+  warning?: string;
 }
 
 /** Per-call page options shared by every runtime entry point. */
@@ -165,6 +178,10 @@ export class BrowserSession {
   private authWatch = new WeakMap<Page, AuthWatch>();
   /** Per profile: why its most recent call signed in again (absent when it did not). */
   private lastRelogin = new Map<string, string>();
+  /** The still-signed-out warning of a page whose first navigation showed the signal after (or without) a re-login. */
+  private signedOutWarning = new WeakMap<Page, string>();
+  /** Per profile: the most recent call's still-signed-out warning (absent when there was none). */
+  private lastWarning = new Map<string, string>();
 
   constructor(
     private readonly workspaceRoot: string,
@@ -241,7 +258,7 @@ export class BrowserSession {
     if (!p) {
       p = {
         name, context: null, page: null, diag: null, loggedIn: false,
-        loginError: null, sessionSnapshot: null, lastUrl: null, identity: null,
+        loginError: null, sessionSnapshot: null, lastUrl: null, identity: null, reloginFutile: false,
       };
       this.profiles.set(name, p);
     }
@@ -343,7 +360,12 @@ export class BrowserSession {
       this.config.autoRelogin !== false &&
       (wasLoggedIn || opts.afterRelogin)
     ) {
-      this.authWatch.set(page, { profile: p.name, login, mark: p.diag.requests.length, final: !!opts.afterRelogin });
+      this.authWatch.set(page, {
+        profile: p.name,
+        login,
+        mark: p.diag.requests.length,
+        mode: opts.afterRelogin ? "afterRelogin" : p.reloginFutile ? "futile" : "relogin",
+      });
     }
 
     return { page, diag: p.diag, profile: p };
@@ -573,7 +595,9 @@ export class BrowserSession {
    * signed out (SignedOutError), sign in again — the profile's context is
    * dropped, exactly as reset_login does, so no stale cookie or token
    * survives — and run the call ONCE more. The second run's navigation is
-   * watched too, and a signed-out page there is a final error: never a loop.
+   * watched too, but never throws: a page that still looks signed out comes
+   * back with a warning (see checkSignedOut). Never a loop. A login flow that
+   * cannot complete throws from the second run.
    */
   private async withAutoRelogin<T>(
     opts: PageOptions,
@@ -581,10 +605,11 @@ export class BrowserSession {
   ): Promise<{ result: T; reloggedIn?: true; reloginReason?: string }> {
     const name = opts.loginAs ?? DEFAULT_PROFILE;
     this.lastRelogin.delete(name);
+    this.lastWarning.delete(name);
     try {
       return { result: await run(false) };
     } catch (err) {
-      if (!(err instanceof SignedOutError) || err.final) throw err;
+      if (!(err instanceof SignedOutError)) throw err;
       // Keep where the profile last was: a flow that starts "on the current page" reopens it.
       const lastUrl = this.profiles.get(name)?.lastUrl ?? null;
       await this.dropProfile(name);
@@ -597,12 +622,24 @@ export class BrowserSession {
 
   /**
    * `{ reloggedIn: true, reloginReason }` when `loginAs`'s most recent call
-   * found the session signed out and signed in again — for tools that drive
-   * the page via withPage. Empty otherwise.
+   * found the session signed out and signed in again, plus
+   * `{ stillSignedOut: true, warning }` when its page still looked signed out
+   * — for tools that drive the page via withPage. Empty otherwise.
    */
-  reloginInfo(loginAs?: string): { reloggedIn?: true; reloginReason?: string } {
-    const reason = this.lastRelogin.get(loginAs ?? DEFAULT_PROFILE);
-    return reason ? { reloggedIn: true, reloginReason: reason } : {};
+  reloginInfo(loginAs?: string): { reloggedIn?: true; reloginReason?: string; stillSignedOut?: true; warning?: string } {
+    const name = loginAs ?? DEFAULT_PROFILE;
+    const reason = this.lastRelogin.get(name);
+    const warning = this.lastWarning.get(name);
+    return {
+      ...(reason ? { reloggedIn: true as const, reloginReason: reason } : {}),
+      ...(warning ? { stillSignedOut: true as const, warning } : {}),
+    };
+  }
+
+  /** `{ stillSignedOut: true, warning }` when this call's page still looked signed out; empty otherwise. */
+  private stillSignedOut(page: Page): { stillSignedOut?: true; warning?: string } {
+    const warning = this.signedOutWarning.get(page);
+    return warning ? { stillSignedOut: true, warning } : {};
   }
 
   /**
@@ -612,7 +649,13 @@ export class BrowserSession {
    *    asked for another URL;
    *  - the navigation's real (un-stubbed) API calls answered 401 — all of
    *    them, or at least two that are at least half of them.
-   * Throws SignedOutError (final when this call already signed in again).
+   * On a signal: throws SignedOutError when the call may still sign in again.
+   * When it already did (and the login succeeded), or an earlier re-login on
+   * this session did not clear the signal, nothing is thrown: the page gets a
+   * warning for the result (`stillSignedOut`) and the session is marked so
+   * later calls do not sign in again for it — a correctly signed-in role
+   * whose page calls endpoints it has no access to keeps its screenshot and
+   * apiCalls.
    */
   private checkSignedOut(page: Page, requested: string): void {
     const watch = this.authWatch.get(page);
@@ -620,15 +663,22 @@ export class BrowserSession {
     this.authWatch.delete(page);
     const reason = this.signedOutReason(page, watch, requested);
     if (!reason) return;
-    if (!watch.final) throw new SignedOutError(reason);
+    if (watch.mode === "relogin") throw new SignedOutError(reason);
     const where = watch.profile === DEFAULT_PROFILE ? "browser.login" : `browser.profiles.${watch.profile}`;
-    throw new SignedOutError(
-      `Still signed out after an automatic re-login: ${reason}. The ${where} flow ran again and passed its success ` +
-        "check, yet the app still treats the browser as signed out — the account may not be allowed on this page, " +
-        "the API may be rejecting every session, or the login's success check passes without a real session. " +
-        `Not retried again. Check ${where} and call reset_login; pass "public": true if this page needs no login; ` +
-        "set browser.autoRelogin to false to get the page back as-is.",
-      true
+    const profile = this.profiles.get(watch.profile);
+    if (profile) profile.reloginFutile = true;
+    const causes =
+      "Likely causes: this account has no access to these calls or this page (expected for a restricted role), " +
+      "or the app is rejecting the session. If the session really is broken, call reset_login (it also re-enables " +
+      "automatic re-login for this profile).";
+    this.signedOutWarning.set(
+      page,
+      watch.mode === "afterRelogin"
+        ? `Signed in again, but the page still looks signed out: ${reason}. The ${where} login flow ran and passed ` +
+          `its success check, so the login worked. ${causes} Not retried; later calls on this session will report ` +
+          "this without signing in again."
+        : `The page looks signed out: ${reason}. An earlier automatic re-login on this session succeeded without ` +
+          `clearing this, so no login was attempted this time. ${causes}`
     );
   }
 
@@ -761,7 +811,7 @@ export class BrowserSession {
     try {
       pendingRequests = await this.navigate(page, url, opts.waitUntil);
     } catch (err) {
-      // Signed out: the caller signs in again and retries (or reports it).
+      // Signed out: the caller signs in again and retries.
       if (err instanceof SignedOutError) throw err;
       // A nav timeout still leaves a renderable page; record it and continue so
       // the agent gets a screenshot + whatever diagnostics accumulated.
@@ -838,6 +888,7 @@ export class BrowserSession {
       ...(router ? { mockApi: router.report(requests) } : {}),
       ...(bodies ? { captureBodies: bodies.report(requests) } : {}),
       signedInAs,
+      ...this.stillSignedOut(page),
       clean:
         consoleErrors.length === 0 &&
         pageErrors.length === 0 &&
@@ -932,6 +983,8 @@ export class BrowserSession {
       } finally {
         // Who the page was signed in as, for the caller's signedInAs().
         this.lastObservation.set(profile.name, await this.observeIdentity(profile, page));
+        const warning = this.signedOutWarning.get(page);
+        if (warning) this.lastWarning.set(profile.name, warning);
       }
     });
     return result;
@@ -987,6 +1040,7 @@ export class BrowserSession {
       return {
         steps: results,
         signedInAs,
+        ...this.stillSignedOut(page),
         ...(router ? { mockApi: router.report(diag.requests.slice(flowMark.rq)) } : {}),
         ...(bodies ? { captureBodies: bodies.report(diag.requests.slice(flowMark.rq)) } : {}),
       };
@@ -1064,7 +1118,7 @@ export class BrowserSession {
       }
     } catch (err) {
       // Signed out on the flow's first navigation: nothing has been done yet,
-      // so the caller signs in again and restarts the flow (or reports it).
+      // so the caller signs in again and restarts the flow.
       if (err instanceof SignedOutError) throw err;
       error = errMessage(err);
     }

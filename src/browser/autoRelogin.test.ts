@@ -20,7 +20,10 @@ import { PropParser } from "../parser/propParser.js";
  * then ran logged out, and the only symptom was a failed click until the
  * agent thought to call reset_login. An authenticated call now notices a
  * signed-out session on its first navigation, signs in again once, retries
- * the call once, and says so (`reloggedIn`).
+ * the call once, and says so (`reloggedIn`). When the login works and the
+ * page still looks signed out (a restricted role whose page calls endpoints
+ * it may not use), the result comes back whole with `stillSignedOut` and a
+ * `warning` — and that session does not sign in again for it.
  *
  * The fixture app keeps server-side sessions the test can expire. Two gates,
  * the two ways real apps show a dead session: "redirect" (a protected page
@@ -42,6 +45,8 @@ interface App {
   deadSessions: boolean;
   /** When true, the login page has no submit button (the login flow cannot finish). */
   loginBroken: boolean;
+  /** A page path that redirects to /login even for a valid session (a page this account may not open). */
+  bounce: string;
 }
 
 const LOGIN_PAGE = (broken: boolean) => `<!doctype html><title>login</title>
@@ -63,7 +68,7 @@ async function app(gate: "redirect" | "api"): Promise<App> {
   const valid = new Set<string>();
   let seq = 0;
   const state: App = {
-    base: "", logins: [], navs: [], adds: 0, deadSessions: false, loginBroken: false,
+    base: "", logins: [], navs: [], adds: 0, deadSessions: false, loginBroken: false, bounce: "",
     expire: () => valid.clear(),
     close: async () => {
       for (const s of sockets) s.destroy();
@@ -102,7 +107,7 @@ async function app(gate: "redirect" | "api"): Promise<App> {
     state.navs.push(url.pathname);
     if (url.pathname === "/login") return html(LOGIN_PAGE(state.loginBroken));
     if (url.pathname === "/public") return html("<!doctype html><title>public</title>");
-    if (gate === "redirect" && !authed) {
+    if (gate === "redirect" && (!authed || url.pathname === state.bounce)) {
       res.writeHead(302, { location: "/login" });
       return res.end();
     }
@@ -191,20 +196,80 @@ test("an expired session that shows as API 401s is signed in again too", async (
   });
 });
 
-test("still signed out after the one re-login is a clear error, not a loop", async () => {
+test("re-login works but the page still looks signed out: the result comes back with a warning, and that session does not sign in again", async () => {
   await withApp("api", async ({ session, app }) => {
     await session.capture(`${app.base}/orders`, {});
+    // From here the API answers 401 to every session, like a role with no access to these calls.
     app.expire();
     app.deadSessions = true;
-    const navsBefore = app.navs.filter((n) => n === "/orders").length;
-    await assert.rejects(session.capture(`${app.base}/orders`, {}), (err: Error) => {
-      assert.match(err.message, /^Still signed out after an automatic re-login: 2 of 2 API call\(s\) answered 401/);
-      assert.match(err.message, /Not retried again/);
-      assert.match(err.message, /reset_login/);
-      return true;
-    });
+    const orderNavs = () => app.navs.filter((n) => n === "/orders").length;
+    const navsBefore = orderNavs();
+
+    const r = await session.capture(`${app.base}/orders`, { captureBodies: ["/api/me"] });
+    assert.equal(r.title, "orders 401,401", "the page as it rendered, not an error");
+    assert.ok(r.screenshotBase64.length > 0);
+    assert.equal(r.reloggedIn, true);
+    assert.match(r.reloginReason ?? "", /2 of 2 API call\(s\) answered 401/);
+    assert.equal(r.stillSignedOut, true);
+    assert.match(r.warning ?? "", /^Signed in again, but the page still looks signed out: 2 of 2 API call\(s\) answered 401/);
+    assert.match(r.warning ?? "", /the login worked/);
+    assert.match(r.warning ?? "", /no access to these calls/);
+    assert.match(r.warning ?? "", /rejecting the session/);
+    assert.match(r.warning ?? "", /reset_login/);
+    assert.equal(r.requests.filter((q) => q.status === 401).length, 2, "the evidence (the 401 calls) is in the result");
+    assert.deepEqual(r.requests.find((q) => q.url.endsWith("/api/me"))?.responseBody?.json, { error: "Token refresh failed" });
     assert.equal(app.logins.length, 2, "one re-login, no more");
-    assert.equal(app.navs.filter((n) => n === "/orders").length - navsBefore, 2, "the navigation ran twice: once, and one retry");
+    assert.equal(orderNavs() - navsBefore, 2, "the navigation ran twice: once, and one retry");
+
+    // Later calls on that session: the warning, no login, one navigation.
+    const later = await session.capture(`${app.base}/orders`, {});
+    assert.equal(later.stillSignedOut, true);
+    assert.equal(later.reloggedIn, undefined, "no login happened in this call");
+    assert.match(later.warning ?? "", /^The page looks signed out: .*An earlier automatic re-login on this session succeeded without clearing this, so no login was attempted/);
+    assert.equal(app.logins.length, 2, "the chronic page does not log in again on every call");
+    assert.equal(orderNavs() - navsBefore, 3);
+    const flow = await session.runFlowDetailed([{ label: "orders", url: `${app.base}/orders`, noScreenshot: true }], {});
+    assert.equal(flow.stillSignedOut, true);
+    assert.match(flow.warning ?? "", /no login was attempted/);
+    assert.equal(flow.steps[0].title, "orders 401,401");
+    assert.equal(app.logins.length, 2);
+
+    // A page without the signal carries no warning.
+    const home = await session.capture(`${app.base}/home`, {});
+    assert.equal(home.stillSignedOut, undefined);
+    assert.equal(home.warning, undefined);
+
+    // reset_login replaces the session: automatic re-login is back.
+    app.deadSessions = false;
+    assert.deepEqual(await session.resetLogin({ relogin: true }), { loggedIn: true });
+    const fresh = await session.capture(`${app.base}/orders`, {});
+    assert.deepEqual([fresh.title, fresh.stillSignedOut, fresh.reloggedIn], ["orders 200,200", undefined, undefined]);
+    app.expire();
+    const again = await session.capture(`${app.base}/orders`, {});
+    assert.deepEqual([again.title, again.reloggedIn, again.stillSignedOut], ["orders 200,200", true, undefined]);
+  });
+});
+
+test("a role that stays on the login page after a working re-login gets the warning too, per profile", async () => {
+  await withApp("redirect", async ({ session, app }) => {
+    await session.capture(`${app.base}/home`, { loginAs: "coach" });
+    await session.capture(`${app.base}/home`, {});
+    // The app sends /orders back to the login page even for a valid session: a page this role may not open.
+    app.bounce = "/orders";
+    app.expire();
+    const r = await session.capture(`${app.base}/orders`, { loginAs: "coach" });
+    assert.equal(r.title, "login");
+    assert.deepEqual([r.reloggedIn, r.stillSignedOut], [true, true]);
+    assert.match(r.warning ?? "", /browser\.profiles\.coach login flow ran and passed its success check/);
+    assert.match(r.warning ?? "", /\/orders ended on the login page/);
+    const logins = app.logins.length;
+    const again = await session.capture(`${app.base}/orders`, { loginAs: "coach" });
+    assert.deepEqual([again.reloggedIn, again.stillSignedOut], [undefined, true]);
+    assert.equal(app.logins.length, logins, "coach does not sign in again");
+
+    // The default profile's session is its own: it still signs in again when it expires.
+    const other = await session.capture(`${app.base}/home`, {});
+    assert.deepEqual([other.title, other.reloggedIn, other.stillSignedOut], ["home", true, undefined]);
   });
 });
 
@@ -343,6 +408,23 @@ test("check_page, capture_flow and inspect_rendered_page report reloggedIn throu
     const calm = await call("inspect_rendered_page", { url: "/orders" });
     assert.equal(calm.reloggedIn, undefined);
     assert.equal(fx.logins.length, 4);
+
+    // The login works but /orders bounces to the login page: a result with the warning, from every tool.
+    fx.bounce = "/orders";
+    fx.expire();
+    const bounced = await call("check_page", { url: "/orders" });
+    assert.deepEqual([bounced.title, bounced.reloggedIn, bounced.stillSignedOut], ["login", true, true]);
+    assert.match(bounced.warning, /Signed in again, but the page still looks signed out/);
+    assert.ok(bounced.screenshotPath);
+    const bouncedFlow = await call("capture_flow", { steps: [{ url: "/orders", noScreenshot: true }] });
+    assert.deepEqual([bouncedFlow.stillSignedOut, bouncedFlow.reloggedIn], [true, undefined]);
+    assert.match(bouncedFlow.warning, /no login was attempted/);
+    const bouncedInspect = await call("inspect_rendered_page", { url: "/orders" });
+    assert.equal(bouncedInspect.stillSignedOut, true);
+    assert.match(bouncedInspect.warning, /reset_login/);
+    assert.equal(fx.logins.length, 5, "one re-login for the bounced page, then none");
+    const fine = await call("check_page", { url: "/home" });
+    assert.equal("stillSignedOut" in fine || "warning" in fine, false);
   } finally {
     await ctx.browser.close();
     await fx.close();

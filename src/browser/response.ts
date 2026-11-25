@@ -59,6 +59,8 @@ export function diagnostics(capture: CaptureResult) {
     ...(capture.signedInAs ? { signedInAs: capture.signedInAs } : {}),
     // The session had expired: this call signed in again and retried once.
     ...(capture.reloggedIn ? { reloggedIn: true, reloginReason: capture.reloginReason } : {}),
+    // The login works but the page still looks signed out (e.g. a role without access).
+    ...(capture.stillSignedOut ? { stillSignedOut: true, warning: capture.warning } : {}),
     screenshotPath: capture.screenshotPath,
   };
 }

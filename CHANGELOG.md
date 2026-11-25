@@ -42,9 +42,14 @@ runs on two click failures whose errors named no cause.
   are at least half) — drops that profile's context, signs in again and
   retries once. Results carry `reloggedIn: true` and `reloginReason`
   (`check_page`, `render_component`, `verify_data_flow`, `capture_flow`,
-  `inspect_rendered_page`). Never loops: a retry that is still signed out
-  fails with `Still signed out after an automatic re-login`, a login flow that
-  cannot complete with `the automatic re-login failed`. Not for public calls,
+  `inspect_rendered_page`). Never loops. When the re-login succeeds and the
+  retry still shows the signal (a role without access to those calls, or a
+  page the app bounces it from), the normal result is returned with
+  `stillSignedOut: true` and a `warning` (the login worked; likely causes;
+  `reset_login` as the manual step), and that profile's session reports the
+  warning on later such calls without signing in again, until `reset_login`.
+  A login flow that cannot complete fails the call with `the automatic
+  re-login failed`. Not for public calls,
   a call for the login page itself, stubbed 401s, or a session the same call
   just created; `loginAs` re-logs only that profile. `browser.autoRelogin:
   false` turns it off.
@@ -69,8 +74,8 @@ runs on two click failures whose errors named no cause.
 #### Changed
 
 - `compileMocks(raw, { baseDir })` takes the workspace root for file bodies;
-  `BrowserSession.runFlowDetailed` also returns `captureBodies`, `reloggedIn`
-  and `reloginReason`; `BrowserSession.navigate` throws `SignedOutError` when
+  `BrowserSession.runFlowDetailed` also returns `captureBodies`, `reloggedIn`,
+  `reloginReason`, `stillSignedOut` and `warning`; `BrowserSession.navigate` throws `SignedOutError` when
   an authenticated call's first navigation is signed out (tools that drive a
   page through `withPage` must let it propagate).
 

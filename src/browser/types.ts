@@ -101,6 +101,14 @@ export interface CaptureResult {
   reloggedIn?: true;
   /** What showed the session was signed out, when `reloggedIn`. */
   reloginReason?: string;
+  /**
+   * Set when the page still looks signed out although the login works: a
+   * re-login (in this call, or earlier on this session) succeeded and the
+   * signal remained. The result is otherwise complete; `warning` explains.
+   */
+  stillSignedOut?: true;
+  /** With `stillSignedOut`: the login worked, the likely causes, and reset_login as the manual step. */
+  warning?: string;
   /** True if nothing went wrong: no page errors, console errors, or failed requests. */
   clean: boolean;
   durationMs: number;

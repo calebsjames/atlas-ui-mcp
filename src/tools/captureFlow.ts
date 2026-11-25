@@ -192,6 +192,7 @@ export async function captureFlow(
         ...(flow.captureBodies ? { captureBodies: flow.captureBodies } : {}),
         signedInAs: flow.signedInAs,
         ...(flow.reloggedIn ? { reloggedIn: true, reloginReason: flow.reloginReason } : {}),
+        ...(flow.stillSignedOut ? { stillSignedOut: true, warning: flow.warning } : {}),
         steps: summaries,
       },
       null,
